@@ -1,6 +1,5 @@
-# main.py
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,7 +39,6 @@ def chat_endpoint(payload: ChatRequest) -> Dict[str, Any]:
     - Frontend → Railway → /chat works
     - All three modes return valid JSON
     """
-
     mode = payload.mode.lower().strip()
 
     # --- CHAT MODE SAMPLE ---
@@ -103,3 +101,5 @@ def chat_endpoint(payload: ChatRequest) -> Dict[str, Any]:
         "key_points": [
             "Valid modes are: chat, pairing, hunt.",
         ],
+        "next_step": "Try again with one of the supported modes.",
+    }
