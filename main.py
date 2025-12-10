@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     logger.warning(
-        "OPENAI_API_KEY is not set. The /chat endpoint in CHAT mode will fail until it is configured."
+        "OPENAI_API_KEY is not set. The /chat endpoint will fail until it is configured."
     )
 
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -27,16 +27,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 class ChatRequest(BaseModel):
-    """Incoming payload from the frontend.
-
-    This matches the JSON the Sam frontend sends:
-    {
-        "mode": "chat" | "pairing" | "hunt",
-        "message": "user text",
-        "advisor": "auto" | "sarn" | "mike",
-        "context": { ... } | null
-    }
-    """
+    """Incoming payload from the frontend."""
 
     mode: Literal["chat", "pairing", "hunt"] = "chat"
     message: str
@@ -50,23 +41,60 @@ class ChatRequest(BaseModel):
 app = FastAPI(
     title="Sam – Bourbon & Cigar Caddie API",
     description="Backend for the standalone Sam agent (bourbon & cigar pairings, hunts, and chat).",
-    version="1.0.0",
+    version="1.1.0",
 )
 
-# Allow the frontend (and local dev) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later if you want to lock to a specific frontend origin
+    allow_origins=["*"],  # tighten later if you want
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------- Helper: Sam System Prompt ----------
+# ---------- System Prompts ----------
 
 
-SAM_SYSTEM_PROMPT = """You are Sam – Bourbon & Cigar Caddie.
+SAM_PAIRING_SYSTEM_PROMPT = """You are Sam – Bourbon & Cigar Caddie.
+
+Task: Build structured pairing recommendations between cigars and spirits (mostly bourbon, but you can include rye or other whiskey when it makes sense).
+
+General personality:
+- Friendly, confident, no fluff.
+- Talk like a knowledgeable bourbon and cigar friend.
+- Be honest about uncertainty and taste being subjective.
+
+You must ALWAYS respond in valid JSON, following this exact structure for PAIRING mode:
+
+{
+  "mode": "pairing",
+  "summary": "Short overview of how you approached the pairing in 1–3 sentences.",
+  "pairings": [
+    {
+      "label": "Short title like 'Mellow nightcap combo' or 'Peppery after-dinner pairing'.",
+      "cigar": "Name and style of the cigar, or a style description if no brand is given.",
+      "spirit": "Name and style of the spirit, usually a bourbon or rye.",
+      "why_it_works": [
+        "Reason 1 the combo works (flavor, strength, mouthfeel, etc.).",
+        "Reason 2...",
+        "Optional extra reasons..."
+      ],
+      "quality_tag": "Simple tag like 'safe starter combo', 'rich and bold', 'special-occasion', or 'budget-friendly'.",
+      "allocation_note": "Note on availability or hunt difficulty, or null if not relevant."
+    }
+  ],
+  "next_step": "A clear suggestion for what the user should do next (e.g., refine preference, budget, proof, or cigar strength)."
+}
+
+Rules:
+- Always set "mode" to "pairing" for PAIRING responses.
+- pairings should usually have 1–3 options; never more than 5.
+- If the user mentions specific bottles or sticks, anchor to those first.
+- If you don’t know availability, set allocation_note to something like 'Check local shops; availability varies.' or null.
+- Do NOT include any extra fields.
+- Do NOT wrap JSON in backticks or any surrounding text – raw JSON only.
+"""
 
 You help users with:
 - Bourbon education
@@ -77,7 +105,7 @@ You help users with:
 General personality:
 - Friendly, confident, no fluff.
 - Talk like a knowledgeable bourbon and cigar friend, not a robot.
-- Be honest about uncertainty (allocation/hunt is never guaranteed).
+- Be honest about uncertainty.
 
 You must ALWAYS respond in valid JSON, following this exact structure for CHAT mode:
 
@@ -107,26 +135,65 @@ Rules:
 - Do NOT wrap JSON in backticks or any surrounding text – raw JSON only.
 """
 
+SAM_PAIRING_SYSTEM_PROMPT = """You are Sam – Bourbon & Cigar Caddie.
+
+Task: Build structured pairing recommendations between cigars and spirits (mostly bourbon, but you can include rye or other whiskey when it makes sense).
+
+General personality:
+- Friendly, confident, no fluff.
+- Talk like a knowledgeable bourbon and cigar friend.
+- Be honest about uncertainty and taste being subjective.
+
+You must ALWAYS respond in valid JSON, following this exact structure for PAIRING mode:
+
+{
+  "mode": "pairing",
+  "summary": "Short overview of how you approached the pairing in 1–3 sentences.",
+  "pairings": [
+    {
+      "label": "Short title like 'Mellow nightcap combo' or 'Peppery after-dinner pairing'.",
+      "cigar": "Name and style of the cigar, or a style description if no brand is given.",
+      "spirit": "Name and style of the spirit, usually a bourbon or rye.",
+      "why_it_works": [
+        "Reason 1 the combo works (flavor, strength, mouthfeel, etc.).",
+        "Reason 2...",
+        "Optional extra reasons..."
+      ],
+      "quality_tag": "Simple tag like 'safe starter combo', 'rich and bold', 'special-occasion', or 'budget-friendly'.",
+      "allocation_note": "Note on availability or hunt difficulty, or null if not relevant."
+    }
+  ],
+  "next_step": "A clear suggestion for what the user should do next (e.g., refine preference, budget, proof, or cigar strength)."
+}
+
+Rules:
+- Always set "mode" to "pairing" for PAIRING responses.
+- pairings should usually have 1–3 options; never more than 5.
+- If the user mentions specific bottles or sticks, anchor to those first.
+- If you don’t know availability, set allocation_note to something like 'Check local shops; availability varies.' or null.
+- Do NOT include any extra fields.
+- Do NOT wrap JSON in backticks or any surrounding text – raw JSON only.
+"""
+
+
+# ---------- OpenAI Helpers ----------
+
 
 def call_openai_chat(
     message: str,
     advisor: str = "auto",
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Call OpenAI to generate a structured CHAT response for Sam.
-
-    Returns a Python dict that already matches the frontend's expected layout.
-    """
+    """Call OpenAI to generate a structured CHAT response for Sam."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
 
-    # You can optionally thread advisor/context into the prompt if you want later.
     user_message_parts: List[str] = [message]
     if advisor != "auto":
         user_message_parts.append(f"advisor_hint={advisor}")
     if context:
         user_message_parts.append(
-            f"context={json.dumps(context)[:1000]}"  # avoid over-long context
+            f"context={json.dumps(context)[:1000]}"
         )
 
     try:
@@ -134,20 +201,19 @@ def call_openai_chat(
             model="gpt-4.1-mini",
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": SAM_SYSTEM_PROMPT},
+                {"role": "system", "content": SAM_CHAT_SYSTEM_PROMPT},
                 {"role": "user", "content": "\n\n".join(user_message_parts)},
             ],
         )
     except Exception as e:
-        logger.exception("OpenAI chat.completions.create failed")
+        logger.exception("OpenAI CHAT call failed")
         raise RuntimeError(f"OpenAI request failed: {e}") from e
 
     content = completion.choices[0].message.content
     try:
         data = json.loads(content)
-    except Exception as e:
-        logger.exception("Failed to parse model JSON; content was: %s", content)
-        # Fallback minimal structure so frontend doesn't break
+    except Exception:
+        logger.exception("Failed to parse CHAT JSON; content was: %s", content)
         return {
             "mode": "chat",
             "summary": "I had trouble formatting a fully structured answer, but here is the core idea.",
@@ -156,9 +222,65 @@ def call_openai_chat(
             "next_step": "Ask your question again in different words if you want a cleaner breakdown.",
         }
 
-    # Ensure mode is set correctly even if the model forgets.
     data["mode"] = "chat"
     return data
+
+
+def call_openai_pairing(
+    message: str,
+    advisor: str = "auto",
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call OpenAI to generate structured PAIRING recommendations for Sam."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+
+    user_message_parts: List[str] = [message]
+    if advisor != "auto":
+        user_message_parts.append(f"advisor_hint={advisor}")
+    if context:
+        user_message_parts.append(
+            f"context={json.dumps(context)[:1000]}"
+        )
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SAM_PAIRING_SYSTEM_PROMPT},
+                {"role": "user", "content": "\n\n".join(user_message_parts)},
+            ],
+        )
+    except Exception as e:
+        logger.exception("OpenAI PAIRING call failed")
+        raise RuntimeError(f"OpenAI request failed: {e}") from e
+
+    content = completion.choices[0].message.content
+    try:
+        data = json.loads(content)
+    except Exception:
+        logger.exception("Failed to parse PAIRING JSON; content was: %s", content)
+        # Fallback minimal structure
+        return {
+            "mode": "pairing",
+            "summary": "I had trouble formatting a fully structured pairing, but here is the core idea.",
+            "pairings": [
+                {
+                    "label": "Fallback pairing",
+                    "cigar": "General cigar style (model response parse error).",
+                    "spirit": "Suggested bourbon or whiskey (model response parse error).",
+                    "why_it_works": [content],
+                    "quality_tag": "unknown",
+                    "allocation_note": "Model JSON parse failed; treat this as rough guidance only.",
+                }
+            ],
+            "next_step": "Ask again with a focus on flavor preferences, budget, and proof range.",
+        }
+
+    data["mode"] = "pairing"
+    return data
+
 
 
 # ---------- Routes ----------
@@ -171,13 +293,15 @@ def healthcheck() -> Dict[str, str]:
 
 @app.post("/chat")
 def chat_endpoint(payload: ChatRequest):
-    """Unified chat endpoint for all three modes.
+    """
+    Unified chat endpoint.
 
-    For now, only CHAT mode is wired to the real OpenAI engine.
-    PAIRING and HUNT still return structured mock data so the UI keeps working.
+    - CHAT → real OpenAI engine (call_openai_chat)
+    - PAIRING → real OpenAI engine (call_openai_pairing)
+    - HUNT → still mock for now
     """
 
-    # --- CHAT MODE: real engine ---
+    # --- CHAT MODE ---
     if payload.mode == "chat":
         try:
             response = call_openai_chat(
@@ -186,34 +310,27 @@ def chat_endpoint(payload: ChatRequest):
                 context=payload.context,
             )
         except RuntimeError as e:
-            # Bubble up as HTTP 500 with a safe message
             logger.error("CHAT mode failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
         return response
 
-    # --- PAIRING MODE: temporary mock ---
+        # --- PAIRING MODE: real engine ---
     if payload.mode == "pairing":
-        return {
-            "mode": "pairing",
-            "summary": "Template PAIRING layout. The real engine will be wired in next.",
-            "pairings": [
-                {
-                    "label": "Example pairing",
-                    "cigar": "Mild to medium Connecticut-wrapped cigar",
-                    "spirit": "Easy-sipping 90–100 proof bourbon",
-                    "why_it_works": [
-                        "Creamy cigar profile plays well with softer oak/vanilla notes.",
-                        "Lower proof bourbon won’t crush a delicate cigar.",
-                    ],
-                    "quality_tag": "safe starter combo",
-                    "allocation_note": None,
-                }
-            ],
-            "next_step": "Tell me what you usually smoke or drink, and I’ll refine this pairing.",
-        }
+        try:
+            response = call_openai_pairing(
+                message=payload.message,
+                advisor=payload.advisor,
+                context=payload.context,
+            )
+        except RuntimeError as e:
+            logger.error("PAIRING mode failed: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
-    # --- HUNT MODE: temporary mock ---
+        return response
+
+
+    # --- HUNT MODE: still mock ---
     if payload.mode == "hunt":
         return {
             "mode": "hunt",
@@ -226,7 +343,7 @@ def chat_endpoint(payload: ChatRequest):
             "next_step": "When you’re ready, name a specific bottle and your city/ZIP so we can shape a hunt plan.",
         }
 
-    # --- FALLBACK: should not normally hit ---
+    # --- FALLBACK ---
     return {
         "mode": "chat",
         "summary": f"Unknown mode '{payload.mode}', so I answered in CHAT style.",
