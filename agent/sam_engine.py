@@ -149,7 +149,6 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
 # ======================================
 
 def run_sam_engine(request: ChatRequest) -> SamResponse:
-
     messages = build_messages(request)
 
     try:
@@ -160,7 +159,19 @@ def run_sam_engine(request: ChatRequest) -> SamResponse:
             response_format={"type": "json_object"}
         )
 
-        raw_json = completion.choices[0].message["parsed"]
+        # NOTE: in the new OpenAI client, `message` is an object, not a dict.
+        msg = completion.choices[0].message
+
+        # Try the structured JSON output first
+        raw_json = getattr(msg, "parsed", None)
+
+        # Fallback: if `parsed` isn't present, parse the content as JSON
+        if raw_json is None:
+            if DEBUG:
+                print("\n====== DEBUG: FALLBACK TO content JSON PARSE ======")
+                print("Raw content:", msg.content)
+                print("===================================================\n")
+            raw_json = json.loads(msg.content)
 
         if DEBUG:
             print("\n====== DEBUG: RAW MODEL JSON ======")
@@ -172,8 +183,7 @@ def run_sam_engine(request: ChatRequest) -> SamResponse:
 
     except Exception as e:
         if DEBUG:
-            print("\n====== DEBUG: ERROR ======")
+            print("\n====== DEBUG: ERROR IN run_sam_engine ======")
             print(str(e))
-            print("==========================\n")
-
+            print("============================================\n")
         raise RuntimeError(f"Engine error: {e}")
