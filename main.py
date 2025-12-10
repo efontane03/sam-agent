@@ -26,7 +26,8 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ---------- Request Model ----------
 
 class ChatRequest(BaseModel):
-    """Incoming payload from the frontend.
+    """
+    Incoming payload from the frontend:
 
     {
       "mode": "chat" | "pairing" | "hunt",
@@ -222,7 +223,6 @@ def call_openai_pairing(
         data = json.loads(content)
     except Exception:
         logger.exception("Failed to parse PAIRING JSON; content was: %s", content)
-        # Fallback minimal structure
         return {
             "mode": "pairing",
             "summary": "I had trouble formatting a fully structured pairing, but here is the core idea.",
