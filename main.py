@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import the new engine + models
-from sam_engine import ChatRequest, SamResponse, run_sam_engine
+from agent.sam_engine import ChatRequest, SamResponse, run_sam_engine
 
 
 # ---------- Logging ----------
