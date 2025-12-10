@@ -36,7 +36,8 @@ class SamResponse(BaseModel):
     next_step: str
     primary_pairing: Optional[Dict[str, Any]] = None
     alternative_pairings: Optional[List[Dict[str, Any]]] = None
-    target_bottles: Optional[List[str]] = None
+    # In hunt mode these are rich objects, not plain strings
+    target_bottles: Optional[List[Dict[str, Any]]] = None
     store_targets: Optional[List[Dict[str, Any]]] = None
 
 # ======================================
@@ -75,42 +76,10 @@ RETURN ONLY JSON. NO markdown, NO prose, NO code fences.
 """
 
 # ======================================
-# BUILD OPENAI MESSAGE ARRAY
-# ======================================
-
-def build_messages(request: ChatRequest) -> List[Dict[str, str]]:
-    messages = []
-
-    # System
-    system_full = SYSTEM_INSTRUCTIONS + "\n\n" + FORMAT_INSTRUCTIONS
-    messages.append({"role": "system", "content": system_full})
-
-    # Insert full raw history
-    for msg in request.history:
-        messages.append({"role": msg.role, "content": msg.content})
-
-    # Final user message
-    user_block = f"""
-MODE: {request.mode}
-ADVISOR: {request.advisor}
-USER_MESSAGE:
-{request.user_message}
-"""
-    messages.append({"role": "user", "content": user_block})
-
-    if DEBUG:
-        print("\n====== DEBUG: MESSAGES SENT TO MODEL ======")
-        print(json.dumps(messages, indent=2))
-        print("===========================================\n")
-
-    return messages
-
-# ======================================
 # JSON NORMALIZATION (COERCION LAYER)
 # ======================================
 
 def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
-
     # Required base fields
     raw.setdefault("voice", "sam")
     raw.setdefault("advisor", "sarn")
@@ -125,7 +94,7 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
         primary = raw.get("primary_pairing", {})
         alt = raw.get("alternative_pairings", [])
 
-        def enforce_prices(block):
+        def enforce_prices(block: Dict[str, Any]) -> Dict[str, Any]:
             block.setdefault("cigar_price_range", "Unknown; confirm at shop")
             block.setdefault("spirit_price_range", "Unknown; confirm at shop")
             block.setdefault("price_take", "fair")
@@ -139,10 +108,28 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     # Hunt coercion
     if raw["mode"] == "hunt":
-        raw.setdefault("target_bottles", [])
-        raw.setdefault("store_targets", [])
+        # Ensure target_bottles is always a list of dicts
+        tb = raw.get("target_bottles", [])
+        if isinstance(tb, list):
+            normalized_tb: List[Dict[str, Any]] = []
+            for entry in tb:
+                if isinstance(entry, dict):
+                    normalized_tb.append(entry)
+                elif isinstance(entry, str):
+                    normalized_tb.append({"label": entry})
+            raw["target_bottles"] = normalized_tb
+        else:
+            raw["target_bottles"] = []
+
+        # Ensure store_targets is always a list of dicts
+        st = raw.get("store_targets", [])
+        if isinstance(st, list):
+            raw["store_targets"] = [s for s in st if isinstance(s, dict)]
+        else:
+            raw["store_targets"] = []
 
     return raw
+
 
 # ======================================
 # MAIN ENGINE FUNCTION
