@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 
 
-# ---------- Config & Client ----------
+# ---------- Logging & Config ----------
 
 logger = logging.getLogger("sam_api")
 logging.basicConfig(level=logging.INFO)
@@ -20,15 +20,22 @@ if not OPENAI_API_KEY:
         "OPENAI_API_KEY is not set. The /chat endpoint will fail until it is configured."
     )
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else OpenAI()
 
 
-# ---------- Request Models ----------
-
+# ---------- Request Model ----------
 
 class ChatRequest(BaseModel):
-    """Incoming payload from the frontend."""
+    """
+    Incoming payload from the frontend:
 
+    {
+      "mode": "chat" | "pairing" | "hunt",
+      "message": "user text",
+      "advisor": "auto" | "sarn" | "mike",
+      "context": { ... } | null
+    }
+    """
     mode: Literal["chat", "pairing", "hunt"] = "chat"
     message: str
     advisor: Literal["auto", "sarn", "mike"] = "auto"
@@ -37,11 +44,10 @@ class ChatRequest(BaseModel):
 
 # ---------- FastAPI App ----------
 
-
 app = FastAPI(
     title="Sam – Bourbon & Cigar Caddie API",
     description="Backend for the standalone Sam agent (bourbon & cigar pairings, hunts, and chat).",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 app.add_middleware(
@@ -54,7 +60,6 @@ app.add_middleware(
 
 
 # ---------- System Prompts ----------
-
 
 SAM_CHAT_SYSTEM_PROMPT = """You are Sam – Bourbon & Cigar Caddie.
 
@@ -206,7 +211,20 @@ Rules:
 - Do NOT wrap JSON in backticks or any surrounding text – raw JSON only.
 """
 
+
 # ---------- OpenAI Helpers ----------
+
+def _build_user_message(
+    message: str,
+    advisor: str = "auto",
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
+    parts: List[str] = [message]
+    if advisor != "auto":
+        parts.append(f"advisor_hint={advisor}")
+    if context:
+        parts.append(f"context={json.dumps(context)[:1000]}")
+    return "\n\n".join(parts)
 
 
 def call_openai_chat(
@@ -218,21 +236,13 @@ def call_openai_chat(
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
 
-    user_message_parts: List[str] = [message]
-    if advisor != "auto":
-        user_message_parts.append(f"advisor_hint={advisor}")
-    if context:
-        user_message_parts.append(
-            f"context={json.dumps(context)[:1000]}"
-        )
-
     try:
         completion = client.chat.completions.create(
             model="gpt-4.1-mini",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SAM_CHAT_SYSTEM_PROMPT},
-                {"role": "user", "content": "\n\n".join(user_message_parts)},
+                {"role": "user", "content": _build_user_message(message, advisor, context)},
             ],
         )
     except Exception as e:
@@ -265,21 +275,13 @@ def call_openai_pairing(
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
 
-    user_message_parts: List[str] = [message]
-    if advisor != "auto":
-        user_message_parts.append(f"advisor_hint={advisor}")
-    if context:
-        user_message_parts.append(
-            f"context={json.dumps(context)[:1000]}"
-        )
-
     try:
         completion = client.chat.completions.create(
             model="gpt-4.1-mini",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SAM_PAIRING_SYSTEM_PROMPT},
-                {"role": "user", "content": "\n\n".join(user_message_parts)},
+                {"role": "user", "content": _build_user_message(message, advisor, context)},
             ],
         )
     except Exception as e:
@@ -291,7 +293,6 @@ def call_openai_pairing(
         data = json.loads(content)
     except Exception:
         logger.exception("Failed to parse PAIRING JSON; content was: %s", content)
-        # Fallback minimal structure
         return {
             "mode": "pairing",
             "summary": "I had trouble formatting a fully structured pairing, but here is the core idea.",
@@ -312,9 +313,57 @@ def call_openai_pairing(
     return data
 
 
+def call_openai_hunt(
+    message: str,
+    advisor: str = "auto",
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call OpenAI to generate a structured HUNT plan for Sam."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SAM_HUNT_SYSTEM_PROMPT},
+                {"role": "user", "content": _build_user_message(message, advisor, context)},
+            ],
+        )
+    except Exception as e:
+        logger.exception("OpenAI HUNT call failed")
+        raise RuntimeError(f"OpenAI request failed: {e}") from e
+
+    content = completion.choices[0].message.content
+    try:
+        data = json.loads(content)
+    except Exception:
+        logger.exception("Failed to parse HUNT JSON; content was: %s", content)
+        return {
+            "mode": "hunt",
+            "summary": "I had trouble formatting a full structured hunt plan, but here is the core idea.",
+            "query": {
+                "bottle": None,
+                "alt_bottles": [],
+                "location_input": None,
+                "radius_km": 0,
+            },
+            "strategy": {
+                "intensity": "light",
+                "time_window": "",
+                "core_ideas": [content],
+            },
+            "stops": [],
+            "general_tips": [],
+            "next_step": "Ask again with your bottle, city/ZIP, and how aggressive you want to hunt.",
+        }
+
+    data["mode"] = "hunt"
+    return data
+
 
 # ---------- Routes ----------
-
 
 @app.get("/health")
 def healthcheck() -> Dict[str, str]:
@@ -326,9 +375,9 @@ def chat_endpoint(payload: ChatRequest):
     """
     Unified chat endpoint.
 
-    - CHAT → real OpenAI engine (call_openai_chat)
+    - CHAT    → real OpenAI engine (call_openai_chat)
     - PAIRING → real OpenAI engine (call_openai_pairing)
-    - HUNT → still mock for now
+    - HUNT    → real OpenAI engine (call_openai_hunt)
     """
 
     # --- CHAT MODE ---
@@ -345,7 +394,7 @@ def chat_endpoint(payload: ChatRequest):
 
         return response
 
-    # --- PAIRING MODE: real engine ---
+    # --- PAIRING MODE ---
     if payload.mode == "pairing":
         try:
             response = call_openai_pairing(
@@ -359,8 +408,7 @@ def chat_endpoint(payload: ChatRequest):
 
         return response
 
-
-           # --- HUNT MODE ---
+    # --- HUNT MODE ---
     if payload.mode == "hunt":
         try:
             response = call_openai_hunt(
@@ -373,3 +421,14 @@ def chat_endpoint(payload: ChatRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
         return response
+
+    # --- FALLBACK ---
+    return {
+        "mode": "chat",
+        "summary": f"Unknown mode '{payload.mode}', so I answered in CHAT style.",
+        "key_points": [
+            "Valid modes are: chat, pairing, hunt.",
+        ],
+        "item_list": [],
+        "next_step": "Try again with one of the supported modes.",
+    }
