@@ -23,19 +23,12 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# ---------- Request Model ----------
+# ---------- Request Models ----------
+
 
 class ChatRequest(BaseModel):
-    """
-    Incoming payload from the frontend:
+    """Incoming payload from the frontend."""
 
-    {
-      "mode": "chat" | "pairing" | "hunt",
-      "message": "user text",
-      "advisor": "auto" | "sarn" | "mike",
-      "context": { ... } | null
-    }
-    """
     mode: Literal["chat", "pairing", "hunt"] = "chat"
     message: str
     advisor: Literal["auto", "sarn", "mike"] = "auto"
@@ -43,6 +36,7 @@ class ChatRequest(BaseModel):
 
 
 # ---------- FastAPI App ----------
+
 
 app = FastAPI(
     title="Sam – Bourbon & Cigar Caddie API",
@@ -60,6 +54,7 @@ app.add_middleware(
 
 
 # ---------- System Prompts ----------
+
 
 SAM_CHAT_SYSTEM_PROMPT = """You are Sam – Bourbon & Cigar Caddie.
 
@@ -145,6 +140,7 @@ Rules:
 
 # ---------- OpenAI Helpers ----------
 
+
 def call_openai_chat(
     message: str,
     advisor: str = "auto",
@@ -158,7 +154,9 @@ def call_openai_chat(
     if advisor != "auto":
         user_message_parts.append(f"advisor_hint={advisor}")
     if context:
-        user_message_parts.append(f"context={json.dumps(context)[:1000]}")
+        user_message_parts.append(
+            f"context={json.dumps(context)[:1000]}"
+        )
 
     try:
         completion = client.chat.completions.create(
@@ -203,7 +201,9 @@ def call_openai_pairing(
     if advisor != "auto":
         user_message_parts.append(f"advisor_hint={advisor}")
     if context:
-        user_message_parts.append(f"context={json.dumps(context)[:1000]}")
+        user_message_parts.append(
+            f"context={json.dumps(context)[:1000]}"
+        )
 
     try:
         completion = client.chat.completions.create(
@@ -223,6 +223,7 @@ def call_openai_pairing(
         data = json.loads(content)
     except Exception:
         logger.exception("Failed to parse PAIRING JSON; content was: %s", content)
+        # Fallback minimal structure
         return {
             "mode": "pairing",
             "summary": "I had trouble formatting a fully structured pairing, but here is the core idea.",
@@ -243,7 +244,9 @@ def call_openai_pairing(
     return data
 
 
+
 # ---------- Routes ----------
+
 
 @app.get("/health")
 def healthcheck() -> Dict[str, str]:
@@ -255,9 +258,9 @@ def chat_endpoint(payload: ChatRequest):
     """
     Unified chat endpoint.
 
-    - CHAT    → real OpenAI engine (call_openai_chat)
+    - CHAT → real OpenAI engine (call_openai_chat)
     - PAIRING → real OpenAI engine (call_openai_pairing)
-    - HUNT    → still mock for now
+    - HUNT → still mock for now
     """
 
     # --- CHAT MODE ---
@@ -274,7 +277,7 @@ def chat_endpoint(payload: ChatRequest):
 
         return response
 
-    # --- PAIRING MODE ---
+    # --- PAIRING MODE: real engine ---
     if payload.mode == "pairing":
         try:
             response = call_openai_pairing(
@@ -287,6 +290,7 @@ def chat_endpoint(payload: ChatRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
         return response
+
 
     # --- HUNT MODE: still mock ---
     if payload.mode == "hunt":
