@@ -29,13 +29,23 @@ class HistoryMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    mode: str = "chat"           # "chat" | "pairing" | "hunt"
+    """
+    Incoming payload from FastAPI.
+
+    mode:
+      - "auto"   -> let the engine infer "chat" | "pairing" | "hunt"
+      - "chat"   -> direct conversational
+      - "pairing"-> cigar + spirit pairings
+      - "hunt"   -> allocation / store hunt mode
+    """
+    mode: str = "auto"
     advisor: str = "auto"        # "auto" | "sarn" | "mike"
     user_message: str
     history: List[HistoryMessage] = Field(default_factory=list)
 
 
 class SamResponse(BaseModel):
+    # Common
     voice: str = "sam"
     advisor: str = "auto"
     mode: str = "chat"
@@ -43,9 +53,11 @@ class SamResponse(BaseModel):
     key_points: List[str] = Field(default_factory=list)
     item_list: List[Dict[str, Any]] = Field(default_factory=list)
     next_step: str = ""
+
     # Pairing
     primary_pairing: Optional[Dict[str, Any]] = None
     alternative_pairings: Optional[List[Dict[str, Any]]] = None
+
     # Hunt
     stops: Optional[List[Dict[str, Any]]] = None
     target_bottles: Optional[List[Dict[str, Any]]] = None
@@ -53,14 +65,19 @@ class SamResponse(BaseModel):
 
 
 # ======================================
-# LOAD SYSTEM INSTRUCTIONS
+# INSTRUCTIONS LOADING
 # ======================================
 
 def load_instructions() -> str:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    """
+    Load Sam's rules / persona from sam_rules.txt
+    (kept in agent/instructions/sam_rules.txt).
+    """
+    base_dir = os.path.dirname(__file__)
     rules_path = os.path.join(base_dir, "instructions", "sam_rules.txt")
     with open(rules_path, "r") as f:
         return f.read()
+
 
 SYSTEM_INSTRUCTIONS = load_instructions()
 
@@ -69,21 +86,94 @@ You MUST return a valid JSON object matching EXACTLY this structure:
 
 {
   "voice": "sam",
-  "advisor": "...",
-  "mode": "...",
-  "summary": "...",
-  "key_points": ["..."],
-  "item_list": [{"label": "...", "value": "..."}],
-  "next_step": "...",
-  "primary_pairing": {...} | null,
-  "alternative_pairings": [... ] | null,
-  "stops": [... ] | null,
-  "target_bottles": [... ] | null,
-  "store_targets": [... ] | null
+  "advisor": "auto" | "sarn" | "mike",
+  "mode": "chat" | "pairing" | "hunt",
+
+  "summary": "One short paragraph summary of the answer.",
+  "key_points": ["bullet point 1", "bullet point 2", "..."],
+  "item_list": [
+    {"label": "Label 1", "value": "Value 1"},
+    {"label": "Label 2", "value": "Value 2"}
+  ],
+  "next_step": "One clear suggested next step for the user.",
+
+  "primary_pairing": {
+    "cigar_name": "...",
+    "cigar_profile": "...",
+    "spirit_name": "...",
+    "spirit_profile": "...",
+    "why_it_works": "..."
+  } | null,
+
+  "alternative_pairings": [
+    {
+      "cigar_name": "...",
+      "cigar_profile": "...",
+      "spirit_name": "...",
+      "spirit_profile": "...",
+      "why_it_works": "..."
+    }
+  ] | null,
+
+  "stops": [
+    {
+      "name": "Store name",
+      "address": "Full address",
+      "notes": "Short notes about allocations / vibe"
+    }
+  ] | null,
+
+  "target_bottles": [
+    {"label": "Bottle or category", "notes": "Any notes or priority"}
+  ] | null,
+
+  "store_targets": [
+    {"label": "Store or chain", "notes": "Why it's included"}
+  ] | null
 }
 
-RETURN ONLY JSON. NO markdown, NO prose, NO code fences.
+Rules:
+- RETURN ONLY valid JSON. NO markdown, NO prose, NO code fences.
+- If a section does not apply, set it to null (not missing).
 """.strip()
+
+
+# ======================================
+# MODE INFERENCE
+# ======================================
+
+def infer_mode(request: ChatRequest) -> str:
+    """
+    If request.mode == "auto", guess based on the user_message and history.
+    Otherwise, respect the explicit mode.
+    """
+    explicit = request.mode.lower().strip()
+    if explicit in {"chat", "pairing", "hunt"}:
+        return explicit
+
+    text = request.user_message.lower()
+
+    # Pairing heuristics
+    pairing_keywords = [
+        "pair", "pairing", "go with", "goes with",
+        "cigar for", "cigar to go with", "what cigar",
+        "what bourbon with this cigar", "what whiskey with this cigar"
+    ]
+    if any(k in text for k in pairing_keywords):
+        return "pairing"
+
+    # Hunt heuristics
+    hunt_keywords = [
+        "allocation", "allocated", "allocated bottles",
+        "hunt", "hunting", "drops",
+        "stores near me", "where to buy", "where should i go",
+        "raffle", "lottery"
+    ]
+    if any(k in text for k in hunt_keywords):
+        return "hunt"
+
+    # Default to chat
+    return "chat"
 
 
 # ======================================
@@ -93,37 +183,39 @@ RETURN ONLY JSON. NO markdown, NO prose, NO code fences.
 def build_messages(request: ChatRequest) -> List[Dict[str, str]]:
     """
     Build the message list for OpenAI from ChatRequest, including:
-    - System instructions (Sam rules + formatting rules)
-    - Conversation history
-    - Current user message annotated with mode + advisor
+    - System instructions (Sam rules)
+    - Format requirements (JSON schema)
+    - Conversation history as simple chat turns
+    - Final user message with advisor + mode context
     """
-    system_content = f"""{SYSTEM_INSTRUCTIONS}
+    inferred_mode = infer_mode(request)
 
----
+    system_block = SYSTEM_INSTRUCTIONS
+    format_block = FORMAT_INSTRUCTIONS
 
-FORMAT RULES (NON-NEGOTIABLE)
-{FORMAT_INSTRUCTIONS}
-
----
-
-CURRENT CONTEXT
-- Mode: {request.mode}
-- Advisor: {request.advisor}
-"""
-
+    # System messages
     messages: List[Dict[str, str]] = [
-        {"role": "system", "content": system_content}
+        {"role": "system", "content": system_block},
+        {"role": "system", "content": format_block},
     ]
 
+    # History
     for h in request.history:
+        if h.role not in {"user", "assistant"}:
+            continue
         messages.append({"role": h.role, "content": h.content})
 
+    # Build final user block with context
+    advisor = request.advisor or "auto"
     user_block = f"""
-User message (mode={request.mode}, advisor={request.advisor}):
+Advisor: {advisor}
+Requested mode: {request.mode}
+Inferred mode (you MUST use this): {inferred_mode}
 
+User message:
 {request.user_message}
 
-Return ONLY valid JSON.
+Return ONLY a single JSON object that matches the required structure.
 """.strip()
 
     messages.append({"role": "user", "content": user_block})
@@ -150,6 +242,20 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     mode = raw.get("mode", "chat")
 
+    # Ensure key_points is list[str]
+    kp = raw.get("key_points") or []
+    if isinstance(kp, list):
+        raw["key_points"] = [str(x) for x in kp]
+    else:
+        raw["key_points"] = [str(kp)]
+
+    # Ensure item_list is list[dict]
+    il = raw.get("item_list") or []
+    if isinstance(il, list):
+        raw["item_list"] = [x for x in il if isinstance(x, dict)]
+    else:
+        raw["item_list"] = []
+
     # Pairing-specific coercion
     if mode == "pairing":
         primary = raw.get("primary_pairing") or {}
@@ -163,19 +269,18 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
                 block["cigar_name"] = block["cigar"]
             if "spirit" in block and "spirit_name" not in block:
                 block["spirit_name"] = block["spirit"]
-
-            block.setdefault("cigar_price_range", "Unknown; confirm at shop")
-            block.setdefault("spirit_price_range", "Unknown; confirm at shop")
-            block.setdefault("price_take", "fair")
             return block
 
-        raw["primary_pairing"] = coerce_pair_block(primary)
+        if isinstance(primary, dict):
+            raw["primary_pairing"] = coerce_pair_block(primary)
+        else:
+            raw["primary_pairing"] = None
 
         norm_alts: List[Dict[str, Any]] = []
         if isinstance(alts, list):
             for alt in alts:
                 norm_alts.append(coerce_pair_block(alt))
-        raw["alternative_pairings"] = norm_alts
+        raw["alternative_pairings"] = norm_alts or None
 
     # Hunt-related coercion (always apply to keep schema safe)
 
