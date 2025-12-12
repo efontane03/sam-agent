@@ -177,34 +177,47 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
                 norm_alts.append(coerce_pair_block(alt))
         raw["alternative_pairings"] = norm_alts
 
-    # Hunt-specific coercion
-    if mode == "hunt":
-        # Ensure stops is list[dict]
-        stops = raw.get("stops") or []
-        if isinstance(stops, list):
-            raw["stops"] = [s for s in stops if isinstance(s, dict)]
-        else:
-            raw["stops"] = []
+    # Hunt-related coercion (always apply to keep schema safe)
 
-        # target_bottles should be list[dict]
-        tb = raw.get("target_bottles") or []
-        if isinstance(tb, list):
-            norm_tb: List[Dict[str, Any]] = []
-            for entry in tb:
-                if isinstance(entry, dict):
-                    norm_tb.append(entry)
-                elif isinstance(entry, str):
-                    norm_tb.append({"label": entry})
-            raw["target_bottles"] = norm_tb
-        else:
-            raw["target_bottles"] = []
+    # stops -> list[dict]
+    stops = raw.get("stops") or []
+    if isinstance(stops, list):
+        norm_stops: List[Dict[str, Any]] = []
+        for s in stops:
+            if isinstance(s, dict):
+                norm_stops.append(s)
+            elif isinstance(s, str):
+                # Wrap stray strings so Pydantic is happy
+                norm_stops.append({"label": s})
+        raw["stops"] = norm_stops
+    else:
+        raw["stops"] = []
 
-        # store_targets should be list[dict]
-        st = raw.get("store_targets") or []
-        if isinstance(st, list):
-            raw["store_targets"] = [s for s in st if isinstance(s, dict)]
-        else:
-            raw["store_targets"] = []
+    # target_bottles -> list[dict]
+    tb = raw.get("target_bottles") or []
+    if isinstance(tb, list):
+        norm_tb: List[Dict[str, Any]] = []
+        for entry in tb:
+            if isinstance(entry, dict):
+                norm_tb.append(entry)
+            elif isinstance(entry, str):
+                norm_tb.append({"label": entry})
+        raw["target_bottles"] = norm_tb
+    else:
+        raw["target_bottles"] = []
+
+    # store_targets -> list[dict]
+    st = raw.get("store_targets") or []
+    if isinstance(st, list):
+        norm_st: List[Dict[str, Any]] = []
+        for s in st:
+            if isinstance(s, dict):
+                norm_st.append(s)
+            elif isinstance(s, str):
+                norm_st.append({"label": s})
+        raw["store_targets"] = norm_st
+    else:
+        raw["store_targets"] = []
 
     return raw
 
