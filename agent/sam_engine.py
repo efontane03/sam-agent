@@ -133,9 +133,41 @@ You MUST return a valid JSON object matching EXACTLY this structure:
 }
 
 Rules:
-- RETURN ONLY valid JSON. NO markdown, NO prose, NO code fences.
-- If a section does not apply, set it to null (not missing).
+
+1. You MUST set the "mode" field in the JSON to exactly one of:
+   - "chat"
+   - "pairing"
+   - "hunt"
+   Never return "auto" in the JSON.
+
+2. If the conversation is about allocations, rare bottles, where to buy,
+   stores near the user, or the user provides a ZIP code / city,
+   you MUST treat it as HUNT mode and set:
+     "mode": "hunt"
+
+3. In HUNT mode, when a city or ZIP is known:
+   - You MUST populate "stops" with AT LEAST 4 store objects.
+   - Each stop MUST have:
+       - "name": store name (chains + independents are fine),
+       - "address": a plausible full street address string,
+       - "notes": short, practical notes about allocations / experience.
+   - You MUST still fill "summary", "key_points", and "next_step",
+     but those DO NOT replace the "stops" list.
+
+   It is acceptable to use best-guess / plausible locations, but do not
+   guarantee real-time availability. Focus on useful guidance.
+
+4. In PAIRING mode:
+   - You MUST fill "primary_pairing" and may add
+     "alternative_pairings" for extra options.
+
+5. In CHAT mode:
+   - Focus on explanations and guidance, but still use
+     "summary", "key_points", "item_list", and "next_step".
+
+Return ONLY a single JSON object. No markdown, no prose outside the JSON.
 """.strip()
+
 
 
 # ======================================
