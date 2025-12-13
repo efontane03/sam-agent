@@ -1,5 +1,7 @@
 import os
 import json
+import re
+
 from typing import List, Dict, Any, Optional
 
 from pydantic import BaseModel, Field
@@ -363,6 +365,46 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
 # MAIN ENGINE FUNCTION
 # ======================================
 
+ZIP_CENTROIDS = {
+    "30344": (33.67512, -84.46026),  # Atlanta/East Point area :contentReference[oaicite:5]{index=5}
+}
+
+def extract_zip(text: str) -> Optional[str]:
+    m = re.search(r"\b\d{5}\b", text or "")
+    return m.group(0) if m else None
+
+def fallback_hunt_stops(zip_code: Optional[str]) -> List[Dict[str, Any]]:
+    # Default to “Atlanta-ish” if we don’t have the ZIP mapped
+    lat0, lng0 = ZIP_CENTROIDS.get(zip_code or "", (33.74900, -84.38798))
+    # Small offsets so markers don’t stack
+    offsets = [(0.012, 0.008), (-0.010, 0.006), (0.006, -0.011), (-0.007, -0.009), (0.015, -0.004)]
+
+    # “Types of stops” (not claiming inventory, just useful targets)
+    templates = [
+        ("Independent bourbon-focused shop", "Ask about allocation lists, drop days, and store picks. Availability changes fast, call ahead."),
+        ("High-volume chain liquor store", "Good for MSRP-ish finds during drops. Ask customer service about allocated release policy."),
+        ("Neighborhood package store", "Relationship play. Buy your daily bottles here and ask how they handle special releases."),
+        ("Cigar lounge with a whiskey bar", "Great intel source. Bartenders often know which local shops run fair raffles."),
+        ("Grocery / big-box with liquor", "Sometimes surprise drops. Check mornings and ask when trucks typically land."),
+    ]
+
+    stops = []
+    for i, (dlat, dlng) in enumerate(offsets):
+        label, notes = templates[i]
+        stops.append({
+            "store_name": label,
+            "name": label,
+            "address": f"Near {zip_code or 'your area'} (use map for closest route)",
+            "city": "Atlanta",
+            "state": "GA",
+            "zip": zip_code,
+            "lat": lat0 + dlat,
+            "lng": lng0 + dlng,
+            "notes": notes,
+        })
+    return stops
+
+
 def run_sam_engine(request: ChatRequest) -> SamResponse:
     """
     Main engine entrypoint used by FastAPI.
@@ -396,6 +438,31 @@ def run_sam_engine(request: ChatRequest) -> SamResponse:
             print("================================\n")
 
         normalized = normalize_response(raw_json)
+                # HUNT safeguard: always give the UI something to render
+        inferred_mode = infer_mode(request)
+        effective_mode = (normalized.get("mode") or inferred_mode or "chat").lower()
+
+        if effective_mode == "hunt":
+            stops = normalized.get("stops") or normalized.get("stops", [])
+
+            if not isinstance(stops, list):
+                stops = []
+
+            if len(stops) < 4:
+                z = extract_zip(getattr(request, "message", "") or getattr(request, "user_message", ""))
+
+                normalized["stops"] = fallback_hunt_stops(z)
+
+                # Also make sure these exist so the frontend fallback section can render
+                normalized.setdefault("store_targets", [
+                    {"label": "Independent bottle shops", "notes": "Best bet for picks and allocation lists."},
+                    {"label": "Chains with loyalty programs", "notes": "Some run predictable drops or raffles."},
+                ])
+                normalized.setdefault("target_bottles", [
+                    {"label": "Store picks", "notes": "Often easier to land and drink great."},
+                    {"label": "Allocation-adjacent bottles", "notes": "Similar profile, less chase."},
+                ])
+
         return SamResponse(**normalized)
 
     except Exception as e:
