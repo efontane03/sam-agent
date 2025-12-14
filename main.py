@@ -1,67 +1,90 @@
-from typing import Any, Dict
-import logging
+from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+import os
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-# Import the new engine + models
-from agent.sam_engine import ChatRequest, SamResponse, run_sam_engine
-
-
-# ---------- Logging ----------
-
-logger = logging.getLogger("sam_api")
-logging.basicConfig(level=logging.INFO)
+# ✅ IMPORTANT: this must match where your engine file actually lives:
+# sam-agent/agent/sam_engine.py  -> from agent.sam_engine import run_sam_engine
+from agent.sam_engine import run_sam_engine
 
 
-# ---------- FastAPI App ----------
+# =========================
+# Request model (MUST match frontend)
+# =========================
+class ChatRequest(BaseModel):
+    mode: str = Field(default="auto")                 # "auto" | "chat" | "pairing" | "hunt"
+    advisor: str = Field(default="auto")              # "auto" | "sarn" | ...
+    user_message: str = Field(default="")             # ✅ frontend uses user_message
+    history: Optional[List[Dict[str, Any]]] = None    # ✅ frontend sends history array
 
-app = FastAPI(
-    title="Sam – Bourbon & Cigar Caddie API",
-    description="Backend for the standalone Sam agent (bourbon & cigar pairings, hunts, and chat).",
-    version="2.0.0",
-)
 
+# =========================
+# FastAPI app
+# =========================
+app = FastAPI(title="Sam Agent", version="1.0.0")
+
+# =========================
+# CORS (required for local index.html + Railway)
+# =========================
+# If you want to lock this down later, replace "*" with your exact origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can tighten this later if you want
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------- Healthcheck ----------
-
-@app.get("/health")
-def healthcheck() -> Dict[str, str]:
+@app.get("/")
+def root():
     return {"status": "ok", "service": "sam-agent"}
 
 
-# ---------- Chat Endpoint (Unified) ----------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-@app.post("/chat", response_model=SamResponse)
-async def chat_endpoint(payload: ChatRequest):
+
+@app.post("/chat")
+def chat_endpoint(payload: ChatRequest):
     """
-    Unified chat endpoint.
-
-    All modes (chat, pairing, hunt) are handled by the engine:
-
-    - Uses ChatRequest:
-        - mode: "chat" | "pairing" | "hunt"
-        - advisor: "auto" | "sarn" | "mike"
-        - user_message: str
-        - history: [{ "role": "user" | "assistant" | "system", "content": str }, ...]
-
-    - Returns SamResponse with:
-        - voice, advisor, mode
-        - summary, key_points, item_list, next_step
-        - pairing fields in pairing mode
-        - hunt fields in hunt mode
+    Frontend POST body must be:
+    {
+      "mode": "auto",
+      "advisor": "auto",
+      "user_message": "...",
+      "history": [...]
+    }
     """
     try:
+        # run_sam_engine returns a Pydantic model (SamResponse) or a dict-like structure
         response = run_sam_engine(payload)
+
+        # FastAPI can serialize Pydantic models automatically, but returning dict is safest.
+        if hasattr(response, "model_dump"):
+            return response.model_dump()
+        if hasattr(response, "dict"):
+            return response.dict()
         return response
+
     except Exception as e:
-        logger.error("Engine call failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # ✅ Always return JSON so the frontend doesn't "hang" on parse
+        return JSONResponse(
+            status_code=500,
+            content={
+                "voice": "sam",
+                "advisor": payload.advisor if payload else "auto",
+                "mode": payload.mode if payload else "chat",
+                "summary": "Backend error while processing the request.",
+                "key_points": [str(e)],
+                "item_list": [],
+                "next_step": "Check Railway logs for the traceback. If you paste it here, I’ll pinpoint the exact fix.",
+                "stops": [],
+            },
+        )
