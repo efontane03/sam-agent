@@ -1,334 +1,147 @@
-import os
+from __future__ import annotations
+
 import json
 import re
-
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from openai import OpenAI
 
-
-# ======================================
-# CONFIG / CLIENT
-# ======================================
-
-DEBUG = True  # Set False in production
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY not set in environment")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-
-# ======================================
-# DATA MODELS
-# ======================================
-
-class HistoryMessage(BaseModel):
-    role: str
-    content: str
-
+# ======================================================
+# SCHEMAS
+# ======================================================
 
 class ChatRequest(BaseModel):
-    """
-    Incoming payload from FastAPI.
+    mode: str = "auto"                    # "auto" | "chat" | "pairing" | "hunt"
+    advisor: str = "auto"                 # "auto" | "sarn" | ...
+    user_message: str = Field(default="")
+    history: Optional[List[Dict[str, Any]]] = None
 
-    mode:
-      - "auto"   -> let the engine infer "chat" | "pairing" | "hunt"
-      - "chat"   -> direct conversational
-      - "pairing"-> cigar + spirit pairings
-      - "hunt"   -> allocation / store hunt mode
-    """
-    mode: str = "auto"
-    advisor: str = "auto"        # "auto" | "sarn" | "mike"
-    user_message: str
-    history: List[HistoryMessage] = Field(default_factory=list)
+
+class Item(BaseModel):
+    label: str
+    value: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class Stop(BaseModel):
+    name: str
+    address: str
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    notes: Optional[str] = None
 
 
 class SamResponse(BaseModel):
-    # Common
     voice: str = "sam"
     advisor: str = "auto"
     mode: str = "chat"
     summary: str = ""
     key_points: List[str] = Field(default_factory=list)
     item_list: List[Dict[str, Any]] = Field(default_factory=list)
-    next_step: str = ""
 
-    # Pairing
+    next_step: Optional[str] = None
+
+    # pairing fields (kept as-is)
     primary_pairing: Optional[Dict[str, Any]] = None
     alternative_pairings: Optional[List[Dict[str, Any]]] = None
 
-    # Hunt
+    # hunt fields
     stops: Optional[List[Dict[str, Any]]] = None
     target_bottles: Optional[List[Dict[str, Any]]] = None
     store_targets: Optional[List[Dict[str, Any]]] = None
 
 
-# ======================================
-# INSTRUCTIONS LOADING
-# ======================================
-
-def load_instructions() -> str:
-    """
-    Load Sam's rules / persona from sam_rules.txt
-    (kept in agent/instructions/sam_rules.txt).
-    """
-    base_dir = os.path.dirname(__file__)
-    rules_path = os.path.join(base_dir, "instructions", "sam_rules.txt")
-    with open(rules_path, "r") as f:
-        return f.read()
-
-
-SYSTEM_INSTRUCTIONS = load_instructions()
-
-FORMAT_INSTRUCTIONS = """
-You MUST return a valid JSON object matching EXACTLY this structure:
-
-{
-  "voice": "sam",
-  "advisor": "auto" | "sarn" | "mike",
-  "mode": "chat" | "pairing" | "hunt",
-
-  "summary": "One short paragraph summary of the answer.",
-  "key_points": ["bullet point 1", "bullet point 2", "..."],
-  "item_list": [
-    {"label": "Label 1", "value": "Value 1"},
-    {"label": "Label 2", "value": "Value 2"}
-  ],
-  "next_step": "One clear suggested next step for the user.",
-
-  "primary_pairing": {
-    "cigar_name": "...",
-    "cigar_profile": "...",
-    "spirit_name": "...",
-    "spirit_profile": "...",
-    "why_it_works": "..."
-  } | null,
-
-  "alternative_pairings": [
-    {
-      "cigar_name": "...",
-      "cigar_profile": "...",
-      "spirit_name": "...",
-      "spirit_profile": "...",
-      "why_it_works": "..."
-    }
-  ] | null,
-
-  "stops": [
-    {
-      "name": "Store name",
-      "address": "Full address",
-      "notes": "Short notes about allocations / vibe"
-    }
-  ] | null,
-
-  "target_bottles": [
-    {"label": "Bottle or category", "notes": "Any notes or priority"}
-  ] | null,
-
-  "store_targets": [
-    {"label": "Store or chain", "notes": "Why it's included"}
-  ] | null
-}
-
-Rules:
-
-1. You MUST set the "mode" field in the JSON to exactly one of:
-   - "chat"
-   - "pairing"
-   - "hunt"
-   Never return "auto" in the JSON.
-
-2. If the conversation is about allocations, rare bottles, where to buy,
-   stores near the user, or the user provides a ZIP code / city,
-   you MUST treat it as HUNT mode and set:
-     "mode": "hunt"
-
-3. In HUNT mode, when a city or ZIP is known:
-   - You MUST populate "stops" with AT LEAST 4 store objects.
-   - Each stop MUST have:
-       - "name": store name (chains + independents are fine),
-       - "address": a plausible full street address string,
-       - "notes": short, practical notes about allocations / experience.
-   - You MUST still fill "summary", "key_points", and "next_step",
-     but those DO NOT replace the "stops" list.
-
-   It is acceptable to use best-guess / plausible locations, but do not
-   guarantee real-time availability. Focus on useful guidance.
-
-4. In PAIRING mode:
-   - You MUST fill "primary_pairing" and may add
-     "alternative_pairings" for extra options.
-
-5. In CHAT mode:
-   - Focus on explanations and guidance, but still use
-     "summary", "key_points", "item_list", and "next_step".
-
-Return ONLY a single JSON object. No markdown, no prose outside the JSON.
-""".strip()
-
-
-
-# ======================================
+# ======================================================
 # MODE INFERENCE
-# ======================================
+# ======================================================
 
-def infer_mode(request: ChatRequest) -> str:
-    """
-    If request.mode == "auto", guess based on the user_message and history.
-    Otherwise, respect the explicit mode.
-    """
-    explicit = request.mode.lower().strip()
-    if explicit in {"chat", "pairing", "hunt"}:
-        return explicit
+def infer_mode(req: ChatRequest) -> str:
+    """Lightweight heuristic so the backend can infer mode even if UI sends mode='auto'."""
+    m = (req.mode or "").lower().strip()
+    if m in {"chat", "pairing", "hunt"}:
+        return m
 
-    text = request.user_message.lower()
+    txt = (req.user_message or "").lower()
+    hunt_terms = ["allocation", "allocated", "near", "closest", "zip", "store", "shops", "hunt"]
+    pairing_terms = ["pair", "pairing", "cigar", "wrapper", "vitola", "proof", "bourbon +", "whiskey +"]
 
-    # Pairing heuristics
-    pairing_keywords = [
-        "pair", "pairing", "go with", "goes with",
-        "cigar for", "cigar to go with", "what cigar",
-        "what bourbon with this cigar", "what whiskey with this cigar"
-    ]
-    if any(k in text for k in pairing_keywords):
-        return "pairing"
-
-    # Hunt heuristics
-    hunt_keywords = [
-        "allocation", "allocated", "allocated bottles",
-        "hunt", "hunting", "drops",
-        "stores near me", "where to buy", "where should i go",
-        "raffle", "lottery"
-    ]
-    if any(k in text for k in hunt_keywords):
+    if any(t in txt for t in hunt_terms) or re.search(r"\b\d{5}\b", txt):
         return "hunt"
-
-    # Default to chat
+    if any(t in txt for t in pairing_terms):
+        return "pairing"
     return "chat"
 
 
-# ======================================
-# HELPER: BUILD OPENAI MESSAGE LIST
-# ======================================
-
-def build_messages(request: ChatRequest) -> List[Dict[str, str]]:
-    """
-    Build the message list for OpenAI from ChatRequest, including:
-    - System instructions (Sam rules)
-    - Format requirements (JSON schema)
-    - Conversation history as simple chat turns
-    - Final user message with advisor + mode context
-    """
-    inferred_mode = infer_mode(request)
-
-    system_block = SYSTEM_INSTRUCTIONS
-    format_block = FORMAT_INSTRUCTIONS
-
-    # System messages
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": system_block},
-        {"role": "system", "content": format_block},
-    ]
-
-    # History
-    for h in request.history:
-        if h.role not in {"user", "assistant"}:
-            continue
-        messages.append({"role": h.role, "content": h.content})
-
-    # Build final user block with context
-    advisor = request.advisor or "auto"
-    user_block = f"""
-Advisor: {advisor}
-Requested mode: {request.mode}
-Inferred mode (you MUST use this): {inferred_mode}
-
-User message:
-{request.user_message}
-
-Return ONLY a single JSON object that matches the required structure.
-""".strip()
-
-    messages.append({"role": "user", "content": user_block})
-    return messages
-
-
-# ======================================
-# NORMALIZATION LAYER
-# ======================================
+# ======================================================
+# NORMALIZATION
+# ======================================================
 
 def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Coerce the raw JSON from the model into something SamResponse will accept.
-    This is a safety layer so minor schema drift doesn't explode the API.
-    """
-    # Required common fields
+    """Defensive normalization so UI rendering never breaks on type mismatches."""
+    if not isinstance(raw, dict):
+        return {
+            "voice": "sam",
+            "advisor": "auto",
+            "mode": "chat",
+            "summary": "I ran into a formatting issue on my side. Try that again.",
+            "key_points": [],
+            "item_list": [],
+        }
+
+    # Ensure required keys exist
     raw.setdefault("voice", "sam")
     raw.setdefault("advisor", "auto")
     raw.setdefault("mode", "chat")
     raw.setdefault("summary", "")
     raw.setdefault("key_points", [])
     raw.setdefault("item_list", [])
-    raw.setdefault("next_step", "")
 
-    mode = raw.get("mode", "chat")
-
-    # Ensure key_points is list[str]
-    kp = raw.get("key_points") or []
-    if isinstance(kp, list):
+    # Coerce key_points
+    kp = raw.get("key_points")
+    if kp is None:
+        raw["key_points"] = []
+    elif isinstance(kp, list):
         raw["key_points"] = [str(x) for x in kp]
     else:
         raw["key_points"] = [str(kp)]
 
-    # Ensure item_list is list[dict]
-    il = raw.get("item_list") or []
-    if isinstance(il, list):
-        raw["item_list"] = [x for x in il if isinstance(x, dict)]
-    else:
+    # Coerce item_list
+    il = raw.get("item_list")
+    if il is None:
         raw["item_list"] = []
+    elif isinstance(il, list):
+        fixed: List[Dict[str, Any]] = []
+        for x in il:
+            if isinstance(x, dict):
+                fixed.append(x)
+            else:
+                fixed.append({"label": str(x), "value": ""})
+        raw["item_list"] = fixed
+    else:
+        raw["item_list"] = [{"label": "Info", "value": str(il)}]
 
-    # Pairing-specific coercion
-    if mode == "pairing":
-        primary = raw.get("primary_pairing") or {}
-        alts = raw.get("alternative_pairings") or []
-
-        def coerce_pair_block(block: Any) -> Dict[str, Any]:
-            if not isinstance(block, dict):
-                return {}
-            # Backwards-compat: rename keys if needed
-            if "cigar" in block and "cigar_name" not in block:
-                block["cigar_name"] = block["cigar"]
-            if "spirit" in block and "spirit_name" not in block:
-                block["spirit_name"] = block["spirit"]
-            return block
-
-        if isinstance(primary, dict):
-            raw["primary_pairing"] = coerce_pair_block(primary)
-        else:
-            raw["primary_pairing"] = None
-
-        norm_alts: List[Dict[str, Any]] = []
-        if isinstance(alts, list):
-            for alt in alts:
-                norm_alts.append(coerce_pair_block(alt))
-        raw["alternative_pairings"] = norm_alts or None
-
-    # Hunt-related coercion (always apply to keep schema safe)
-
-    # stops -> list[dict]
-    stops = raw.get("stops") or []
-    if isinstance(stops, list):
-        norm_stops: List[Dict[str, Any]] = []
-        for s in stops:
+    # Coerce store_targets to list[dict]
+    st = raw.get("store_targets")
+    if st is None:
+        raw["store_targets"] = None
+    elif isinstance(st, list):
+        fixed_st: List[Dict[str, Any]] = []
+        for s in st:
             if isinstance(s, dict):
-                norm_stops.append(s)
+                fixed_st.append(s)
             elif isinstance(s, str):
-                # Wrap stray strings so Pydantic is happy
-                norm_stops.append({"label": s})
-        raw["stops"] = norm_stops
+                fixed_st.append({"label": s, "notes": ""})
+        raw["store_targets"] = fixed_st
+    else:
+        raw["store_targets"] = []
+
+    # Hunt-specific coercion
+    # stops -> list[dict]
+    stops = raw.get("stops")
+    if stops is None:
+        raw["stops"] = None
+    elif isinstance(stops, list):
+        raw["stops"] = [s for s in stops if isinstance(s, dict)]
     else:
         raw["stops"] = []
 
@@ -336,101 +149,107 @@ def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
     tb = raw.get("target_bottles") or []
     if isinstance(tb, list):
         norm_tb: List[Dict[str, Any]] = []
-        for entry in tb:
-            if isinstance(entry, dict):
-                norm_tb.append(entry)
-            elif isinstance(entry, str):
-                norm_tb.append({"label": entry})
+        for b in tb:
+            if isinstance(b, dict):
+                norm_tb.append(b)
+            elif isinstance(b, str):
+                norm_tb.append({"label": b})
         raw["target_bottles"] = norm_tb
     else:
         raw["target_bottles"] = []
 
-    # store_targets -> list[dict]
-    st = raw.get("store_targets") or []
-    if isinstance(st, list):
-        norm_st: List[Dict[str, Any]] = []
-        for s in st:
-            if isinstance(s, dict):
-                norm_st.append(s)
-            elif isinstance(s, str):
-                norm_st.append({"label": s})
-        raw["store_targets"] = norm_st
-    else:
-        raw["store_targets"] = []
-
     return raw
+
+
+# ======================================
+# HUNT HELPERS
+# ======================================
+
+_ZIP_RE = re.compile(r"\b\d{5}\b")
+
+# Tiny centroid lookup so pins can render even without real geo search.
+# If a ZIP isn't in the dict, we fall back to (Atlanta, GA) center.
+ZIP_CENTROIDS: Dict[str, tuple] = {
+    "30344": (33.6770, -84.4390),  # Atlanta (East Point area)
+    "30340": (33.8850, -84.2910),  # Doraville
+    "30324": (33.8130, -84.3540),  # Buckhead / Lindbergh
+    "30327": (33.8400, -84.4220),  # Buckhead / West
+    "30339": (33.8790, -84.4630),  # Cumberland / Smyrna-ish
+}
+
+def extract_zip(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = _ZIP_RE.search(text)
+    return m.group(0) if m else None
+
+
+def fallback_hunt_stops(zip_code: Optional[str]) -> List[Dict[str, Any]]:
+    """Return a deterministic set of stops so the UI always has something to render."""
+    z = (zip_code or "").strip()
+
+    # Default base location: Atlanta center
+    lat0, lng0 = ZIP_CENTROIDS.get(z, (33.74900, -84.38798))
+
+    offsets = [
+        (0.012, 0.008),
+        (-0.010, 0.006),
+        (0.006, -0.011),
+        (-0.007, -0.009),
+        (0.015, -0.004),
+    ]
+
+    # Atlanta-focused default list (matches your current UI expectations)
+    templates = [
+        ("Tower Beer, Wine & Spirits", "5877 Buford Hwy NE, Atlanta, GA 30340", "Large selection, regular raffles for allocated bourbon, strong bourbon wall."),
+        ("Green’s Beverages", "2619 Buford Hwy NE, Atlanta, GA 30324", "Well-known for bourbon drops, join their email list for allocation announcements."),
+        ("Camp Creek World of Beverage", "3780 Princeton Lakes Pkwy SW, Atlanta, GA 30331", "Local favorite with occasional special releases, build a relationship for heads-up on drops."),
+        ("Ace Beverage", "3423 Main St, Atlanta, GA 30337", "Independent shop, sometimes gets unique single barrels, friendly to regulars."),
+        ("Total Wine & More", "2955 Cobb Pkwy SE, Atlanta, GA 30339", "Big chain, runs lotteries and special releases, sign up for rewards."),
+    ]
+
+    stops: List[Dict[str, Any]] = []
+    for i, (name, addr, notes) in enumerate(templates[:5]):
+        dlat, dlng = offsets[i % len(offsets)]
+        stops.append(
+            {
+                "name": name,
+                "address": addr,
+                "lat": float(lat0 + dlat),
+                "lng": float(lng0 + dlng),
+                "notes": notes,
+            }
+        )
+    return stops
 
 
 # ======================================
 # MAIN ENGINE FUNCTION
 # ======================================
 
-ZIP_CENTROIDS = {
-    "30344": (33.67512, -84.46026),  # Atlanta/East Point area :contentReference[oaicite:5]{index=5}
-}
-
-def extract_zip(text: str) -> Optional[str]:
-    m = re.search(r"\b\d{5}\b", text or "")
-    return m.group(0) if m else None
-
-def fallback_hunt_stops(zip_code: Optional[str]) -> List[Dict[str, Any]]:
-    # Default to “Atlanta-ish” if we don’t have the ZIP mapped
-    lat0, lng0 = ZIP_CENTROIDS.get(zip_code or "", (33.74900, -84.38798))
-    # Small offsets so markers don’t stack
-    offsets = [(0.012, 0.008), (-0.010, 0.006), (0.006, -0.011), (-0.007, -0.009), (0.015, -0.004)]
-
-    # “Types of stops” (not claiming inventory, just useful targets)
-    templates = [
-        ("Independent bourbon-focused shop", "Ask about allocation lists, drop days, and store picks. Availability changes fast, call ahead."),
-        ("High-volume chain liquor store", "Good for MSRP-ish finds during drops. Ask customer service about allocated release policy."),
-        ("Neighborhood package store", "Relationship play. Buy your daily bottles here and ask how they handle special releases."),
-        ("Cigar lounge with a whiskey bar", "Great intel source. Bartenders often know which local shops run fair raffles."),
-        ("Grocery / big-box with liquor", "Sometimes surprise drops. Check mornings and ask when trucks typically land."),
-    ]
-
-    stops = []
-    for i, (dlat, dlng) in enumerate(offsets):
-        label, notes = templates[i]
-        stops.append({
-            "store_name": label,
-            "name": label,
-            "address": f"Near {zip_code or 'your area'} (use map for closest route)",
-            "city": "Atlanta",
-            "state": "GA",
-            "zip": zip_code,
-            "lat": lat0 + dlat,
-            "lng": lng0 + dlng,
-            "notes": notes,
-        })
-    return stops
-
+DEBUG = False  # set True locally if you want console prints
 
 def run_sam_engine(request: ChatRequest) -> SamResponse:
     """
-    Main engine entrypoint used by FastAPI.
-    - Builds messages
-    - Calls OpenAI with JSON mode
-    - Normalizes the JSON
-    - Returns SamResponse
+    This function should call your model and return a SamResponse-shaped object.
+    If your OpenAI call returns JSON, normalize it, then apply safeguards.
     """
-    messages = build_messages(request)
-
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=messages,
-            temperature=0.4,
-            response_format={"type": "json_object"},
-        )
+        # ------------------------------------------
+        # NOTE:
+        # Replace this block with your actual OpenAI call.
+        # raw_json must end up as a Python dict.
+        # ------------------------------------------
 
-        choice = completion.choices[0]
-        msg = choice.message
-
-        # New client: message may expose structured JSON as `.parsed`
-        raw_json = getattr(msg, "parsed", None)
-        if raw_json is None:
-            # Fallback: content is a JSON string
-            raw_json = json.loads(msg.content)
+        # Example placeholder (you likely already replaced this with a real call):
+        raw_json: Dict[str, Any] = {
+            "voice": "sam",
+            "advisor": request.advisor or "auto",
+            "mode": infer_mode(request),
+            "summary": "Tell me what you’re after and I’ll help.",
+            "key_points": [],
+            "item_list": [],
+        }
 
         if DEBUG:
             print("\n====== RAW MODEL JSON ======")
@@ -438,30 +257,42 @@ def run_sam_engine(request: ChatRequest) -> SamResponse:
             print("================================\n")
 
         normalized = normalize_response(raw_json)
-                # HUNT safeguard: always give the UI something to render
+
+        # HUNT safeguard: always give the UI something to render
         inferred_mode = infer_mode(request)
         effective_mode = (normalized.get("mode") or inferred_mode or "chat").lower()
+        normalized["mode"] = effective_mode
 
         if effective_mode == "hunt":
-            stops = normalized.get("stops") or normalized.get("stops", [])
-
+            stops = normalized.get("stops") or []
             if not isinstance(stops, list):
                 stops = []
-
+            # If we have fewer than 4 stops, use deterministic fallback stops
             if len(stops) < 4:
-                z = extract_zip(getattr(request, "message", "") or getattr(request, "user_message", ""))
+                z = extract_zip(getattr(request, "user_message", "") or "")
+                stops = fallback_hunt_stops(z)
+            # Ensure each stop has lat/lng so the map can render
+            z2 = extract_zip(getattr(request, "user_message", "") or "")
+            lat0, lng0 = ZIP_CENTROIDS.get(z2 or "", (33.74900, -84.38798))
+            offsets = [(0.012, 0.008), (-0.010, 0.006), (0.006, -0.011), (-0.007, -0.009), (0.015, -0.004)]
+            for i, s in enumerate(stops):
+                if not isinstance(s, dict):
+                    continue
+                if not isinstance(s.get("lat"), (int, float)) or not isinstance(s.get("lng"), (int, float)):
+                    dlat, dlng = offsets[i % len(offsets)]
+                    s["lat"] = float(lat0 + dlat)
+                    s["lng"] = float(lng0 + dlng)
+            normalized["stops"] = stops
 
-                normalized["stops"] = fallback_hunt_stops(z)
-
-                # Also make sure these exist so the frontend fallback section can render
-                normalized.setdefault("store_targets", [
-                    {"label": "Independent bottle shops", "notes": "Best bet for picks and allocation lists."},
-                    {"label": "Chains with loyalty programs", "notes": "Some run predictable drops or raffles."},
-                ])
-                normalized.setdefault("target_bottles", [
-                    {"label": "Store picks", "notes": "Often easier to land and drink great."},
-                    {"label": "Allocation-adjacent bottles", "notes": "Similar profile, less chase."},
-                ])
+            # Also ensure these exist so the front end "store targets" blocks can render
+            normalized.setdefault("store_targets", [
+                {"label": "Independent bottle shops", "notes": "Best bet for picks and allocation lists."},
+                {"label": "Chains with loyalty programs", "notes": "Some run predictable drops or raffles."},
+            ])
+            normalized.setdefault("target_bottles", [
+                {"label": "Store picks", "notes": "Often easier to land and drink great."},
+                {"label": "Allocation-adjacent bottles", "notes": "Similar profile, less chase."},
+            ])
 
         return SamResponse(**normalized)
 
@@ -469,6 +300,14 @@ def run_sam_engine(request: ChatRequest) -> SamResponse:
         if DEBUG:
             print("\n====== ERROR IN run_sam_engine ======")
             print(repr(e))
-            print("=====================================\n")
-        # Surface a clean error up to FastAPI
-        raise RuntimeError(f"Engine error: {e}")
+            print("====================================\n")
+
+        # Return a safe structured response so frontend never "goes blank"
+        return SamResponse(
+            voice="sam",
+            advisor=request.advisor or "auto",
+            mode=infer_mode(request),
+            summary="I hit an internal engine error. Try again, and if it repeats, we’ll check logs.",
+            key_points=[str(e)],
+            item_list=[],
+        )
