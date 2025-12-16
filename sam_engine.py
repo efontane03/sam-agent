@@ -1,485 +1,586 @@
 """sam_engine.py
-Standalone Sam engine (single-file) that:
-- Enforces a locked response schema (SamResponse)
-- Routes between INFO / PAIRING / HUNT / CLARIFY
-- Supports slot-filling (clarify -> resolve) with session context
-- Captures ZIP (5-digit) from messages to satisfy HUNT gating
 
-This file is designed to be imported by main.py:
+Drop-in engine for Sam Agent.
+
+- No external module imports (no sam_schema dependency).
+- Returns a JSON-serializable dict matching the locked response schema every time.
+- Designed to be called from FastAPI main.py:
+
     from sam_engine import sam_engine, SamSession
+    resp = sam_engine(payload.message, session)
 
-No external modules required.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal, Tuple
 import re
 
 
-# ===============================
-# Locked schema
-# ===============================
+# ==============================
+# Locked schema helpers
+# ==============================
 
-class SamMode(str, Enum):
-    INFO = "info"
-    PAIRING = "pairing"
-    HUNT = "hunt"
-    CLARIFY = "clarify"
+SamMode = Literal["info", "pairing", "hunt", "clarify"]
 
 
-@dataclass
-class Pairing:
-    cigar: str
-    strength: str
-    pour: Optional[str] = None
-    quality_tag: Optional[str] = None
-    why: List[str] = field(default_factory=list)
-
-
-@dataclass
-class Stop:
-    name: Optional[str] = None
-    address: Optional[str] = None
-    notes: Optional[str] = None
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-
-
-@dataclass
-class SamResponse:
-    voice: str = "sam"
-    mode: str = SamMode.INFO.value
-    summary: str = ""
-    key_points: List[str] = field(default_factory=list)
-    item_list: List[Dict[str, str]] = field(default_factory=list)
-    next_step: str = ""
-
-    # Pairing fields
-    primary_pairing: Optional[Dict[str, Any]] = None
-    alternative_pairings: List[Dict[str, Any]] = field(default_factory=list)
-
-    # Hunt fields
-    stops: List[Dict[str, Any]] = field(default_factory=list)
-    target_bottles: List[str] = field(default_factory=list)
-    store_targets: List[str] = field(default_factory=list)
-
-
-def _pairing_to_dict(p: Pairing) -> Dict[str, Any]:
+def _blank_response(mode: SamMode = "info") -> Dict[str, Any]:
+    """Return a fully-populated response dict with all required keys."""
     return {
-        "cigar": p.cigar,
-        "strength": p.strength,
-        "pour": p.pour,
-        "quality_tag": p.quality_tag,
-        "why": list(p.why or []),
+        "voice": "sam",
+        "mode": mode,
+        "summary": "",
+        "key_points": [],
+        "item_list": [],
+        "next_step": "",
+        "primary_pairing": None,
+        "alternative_pairings": [],
+        "stops": [],
+        "target_bottles": [],
+        "store_targets": [],
     }
 
 
-def _stop_to_dict(s: Stop) -> Dict[str, Any]:
+def _item(label: str, value: str) -> Dict[str, str]:
+    return {"label": str(label), "value": str(value)}
+
+
+def _stop(
+    name: str,
+    address: str = "",
+    notes: str = "",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Dict[str, Any]:
     out: Dict[str, Any] = {
-        "name": s.name,
-        "address": s.address,
-        "notes": s.notes,
-        "lat": s.lat,
-        "lng": s.lng,
+        "name": str(name),
+        "address": str(address),
+        "notes": str(notes),
     }
-    # Remove None keys to keep payload clean
-    return {k: v for k, v in out.items() if v is not None}
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        out["lat"] = float(lat)
+        out["lng"] = float(lng)
+    return out
 
 
-def coerce_to_sam_response(obj: Any) -> Dict[str, Any]:
-    """Return JSON-serializable dict matching the locked schema."""
-    if isinstance(obj, SamResponse):
-        return {
-            "voice": obj.voice,
-            "mode": obj.mode,
-            "summary": obj.summary,
-            "key_points": obj.key_points,
-            "item_list": obj.item_list,
-            "next_step": obj.next_step,
-            "primary_pairing": obj.primary_pairing,
-            "alternative_pairings": obj.alternative_pairings,
-            "stops": obj.stops,
-            "target_bottles": obj.target_bottles,
-            "store_targets": obj.store_targets,
-        }
+def _pairing(
+    cigar: str,
+    strength: str,
+    pour: Optional[str] = None,
+    why: Optional[List[str]] = None,
+    quality_tag: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "cigar": cigar,
+        "strength": strength,
+        "pour": pour,
+        "why": why or [],
+        "quality_tag": quality_tag,
+    }
+
+
+def _coerce_jsonable(obj: Any) -> Any:
+    """Best-effort conversion to JSON-serializable primitives."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
     if isinstance(obj, dict):
-        # best-effort normalization
-        base = SamResponse()
-        for k, v in obj.items():
-            if hasattr(base, k):
-                setattr(base, k, v)
-        return coerce_to_sam_response(base)
-    raise TypeError("Unsupported response type")
+        return {str(k): _coerce_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_coerce_jsonable(v) for v in obj]
+    # Fallback
+    return str(obj)
 
 
-# ===============================
-# Session
-# ===============================
+# ==============================
+# Session / memory
+# ==============================
+
 
 @dataclass
 class SamSession:
-    user_id: str = ""
+    user_id: str
     context: Dict[str, Any] = field(default_factory=dict)
-    pending_clarify: Optional[Dict[str, Any]] = None
+
+    # Internal memory (do not expose directly)
+    last_mode: SamMode = "info"
+
+    # Hunt state
+    hunt_area: Optional[str] = None  # zip/city/state
+    hunt_target_bottle: Optional[str] = None
+    hunt_waiting_for_area: bool = False
+    hunt_waiting_for_target: bool = False
+
+    # Pairing state
+    pairing_spirit: Optional[str] = None
+    pairing_strength: Optional[str] = None
+    pairing_waiting_for_spirit: bool = False
+    pairing_waiting_for_strength: bool = False
 
 
-# ===============================
-# Intent extraction
-# ===============================
-
-_HUNT_WORDS = (
-    "allocation",
-    "allocated",
-    "hunt",
-    "drop",
-    "raffle",
-    "where can i find",
-    "near me",
-    "best allocation shops",
-    "liquor store",
-    "store",
-    "shop",
-)
-
-_PAIRING_WORDS = (
-    "pair",
-    "pairing",
-    "cigar",
-)
-
-_SPIRIT_WORDS = (
-    "bourbon",
-    "rye",
-    "scotch",
-    "whiskey",
-    "whisky",
-    "tequila",
-    "rum",
-    "gin",
-    "vodka",
-)
+# ==============================
+# Parsing / inference
+# ==============================
 
 
-def _norm(text: str) -> str:
-    return (text or "").strip().lower()
+_RE_ZIP = re.compile(r"\b\d{5}\b")
 
 
-def extract_zip(text: str) -> Optional[str]:
-    m = re.search(r"\b\d{5}\b", text or "")
+def _extract_zip(text: str) -> Optional[str]:
+    m = _RE_ZIP.search(text or "")
     return m.group(0) if m else None
 
 
-def is_hunt_intent(text: str) -> bool:
-    t = _norm(text)
-    if extract_zip(t):
+def _looks_like_location(text: str) -> bool:
+    if _extract_zip(text):
         return True
-    return any(w in t for w in _HUNT_WORDS)
+    t = (text or "").lower()
+    # crude city/state pattern and common phrases
+    if "," in t and any(s.strip() for s in t.split(",")[:2]):
+        return True
+    if "near me" in t or "closest" in t or "in my area" in t:
+        return True
+    return False
 
 
-def is_pairing_intent(text: str) -> bool:
-    t = _norm(text)
-    return any(w in t for w in _PAIRING_WORDS)
+def _infer_mode(text: str, session: SamSession) -> SamMode:
+    t = (text or "").lower().strip()
+
+    hunt_hits = [
+        "allocation",
+        "allocated",
+        "drop",
+        "raffle",
+        "store",
+        "shop",
+        "shops",
+        "near me",
+        "closest",
+        "where can i find",
+        "hunt",
+    ]
+    pairing_hits = ["pair", "pairing", "cigar", "stick", "smoke", "maduro", "connecticut"]
+
+    if any(h in t for h in hunt_hits) or _extract_zip(t):
+        return "hunt"
+
+    if any(h in t for h in pairing_hits):
+        return "pairing"
+
+    # If we're mid-flow, keep the mode sticky
+    if session.hunt_waiting_for_area or session.hunt_waiting_for_target:
+        return "hunt"
+    if session.pairing_waiting_for_spirit or session.pairing_waiting_for_strength:
+        return "pairing"
+
+    return "info"
 
 
-def extract_hunt_intent(text: str) -> Dict[str, Any]:
-    t = _norm(text)
-    out: Dict[str, Any] = {}
+def _normalize_strength(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    if any(x in t for x in ["mild", "light"]):
+        return "mild"
+    if "medium" in t:
+        return "medium"
+    if any(x in t for x in ["full", "strong"]):
+        return "full"
+    return None
 
-    # store vs bottle
-    if "best allocation" in t or "best shops" in t or "shops" in t or "stores" in t:
-        out["hunt_type"] = "stores"
+
+# ==============================
+# Core behaviors
+# ==============================
+
+
+def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
+    """Main entry. Always returns a dict following the locked schema."""
+
+    msg = (message or "").strip()
+    t = msg.lower()
+
+    # Merge optional context the UI might send
+    # (FastAPI main.py already does session.context.update(payload.context))
+    # but we tolerate additional nesting.
+    if isinstance(session.context, dict):
+        # Some UIs pass {"location_hint": "30344"}
+        loc_hint = session.context.get("location_hint")
+        if isinstance(loc_hint, str) and loc_hint.strip():
+            session.hunt_area = session.hunt_area or loc_hint.strip()
+
+    # Determine mode
+    mode: SamMode = _infer_mode(msg, session)
+
+    # Route
+    if mode == "hunt":
+        resp = _handle_hunt(msg, session)
+    elif mode == "pairing":
+        resp = _handle_pairing(msg, session)
     else:
-        out["hunt_type"] = "bottle" if ("weller" in t or "blanton" in t or "eh taylor" in t or "eagle rare" in t) else "stores"
+        resp = _handle_info(msg, session)
 
-    # bottle hint (simple)
-    for b in ["weller", "blanton", "eh taylor", "eagle rare", "stagg", "michter", "four roses", "booker"]:
-        if b in t:
-            out["bottle_hint"] = b.title()
-            break
+    # Persist last_mode
+    session.last_mode = resp.get("mode", mode)  # type: ignore
 
-    # location
-    z = extract_zip(t)
-    if z:
-        out["location_hint"] = z
-
-    return out
+    # Ensure schema completeness + JSON-serializable
+    base = _blank_response(resp.get("mode", mode))
+    base.update(resp)
+    return _coerce_jsonable(base)
 
 
-def extract_pairing_intent(text: str) -> Dict[str, Any]:
-    t = _norm(text)
-    out: Dict[str, Any] = {}
-
-    # spirit type
-    spirit = None
-    for w in _SPIRIT_WORDS:
-        if w in t:
-            spirit = w
-            break
-    if spirit:
-        out["spirit_type"] = spirit
-
-    # strength
-    strength = None
-    if "mild" in t:
-        strength = "mild"
-    elif "medium" in t:
-        strength = "medium"
-    elif "full" in t or "strong" in t:
-        strength = "full"
-    if strength:
-        out["cigar_strength"] = strength
-
-    # specific spirit/bottle hint (simple)
-    for b in ["eagle rare", "weller", "blanton", "stagg", "four roses", "booker", "michter"]:
-        if b in t:
-            out["spirit_hint"] = b.title()
-            break
-
-    return out
+# ------------------------------
+# INFO
+# ------------------------------
 
 
-# ===============================
-# Clarify builder
-# ===============================
+def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("info")
 
-def clarify_for_hunt(session: SamSession) -> SamResponse:
-    return SamResponse(
-        mode=SamMode.CLARIFY.value,
-        summary="I can do this, I just need your hunt area and target.",
-        key_points=[
-            "Send your ZIP or city/state.",
-            "Tell me if you want a specific bottle or just the best allocation shops.",
-        ],
-        item_list=[
-            {"label": "Example A", "value": "30344 + Weller"},
-            {"label": "Example B", "value": "Dallas, TX + best allocation shops"},
-        ],
-        next_step="Reply with ZIP/city and either a bottle name or 'best allocation shops'.",
+    r["summary"] = (
+        "Tell me what you’re working with and what you want out of it, and I’ll guide you cleanly."
     )
+    r["key_points"] = [
+        "If you want a cigar pairing, say the spirit and desired cigar strength.",
+        "If you want an allocation hunt, include your ZIP or city/state.",
+    ]
+    r["next_step"] = "Try: ‘pair a cigar with Eagle Rare’ or ‘30344 best allocation shops’."
+
+    # Light personalization using stash if present
+    stash = None
+    if isinstance(session.context, dict):
+        stash = session.context.get("home_stash")
+    if isinstance(stash, dict) and stash.get("items"):
+        r["item_list"].append(_item("Home Stash detected", "I can prioritize what you already own."))
+
+    return r
 
 
-def clarify_for_pairing(session: SamSession) -> SamResponse:
-    return SamResponse(
-        mode=SamMode.CLARIFY.value,
-        summary="Quick couple details so I can nail the pairing.",
-        key_points=[
-            "What are you pairing for: bourbon, rye, scotch, or something else?",
-            "Do you want a mild, medium, or full cigar?",
-        ],
-        item_list=[
-            {"label": "Example", "value": "bourbon + medium"},
-        ],
-        next_step="Reply with spirit type + cigar strength.",
-    )
+# ------------------------------
+# PAIRING
+# ------------------------------
 
 
-# ===============================
-# Core engine
-# ===============================
+def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("pairing")
 
-def sam_engine(user_message: str, session: Optional[SamSession] = None) -> Dict[str, Any]:
-    """Main entry.
+    # If we're waiting for missing pieces, treat the user's next message as the answer.
+    strength = _normalize_strength(msg)
 
-    Returns a JSON-serializable dict matching SamResponse schema.
-    """
-    if session is None:
-        session = SamSession()
+    if session.pairing_waiting_for_spirit:
+        session.pairing_spirit = msg
+        session.pairing_waiting_for_spirit = False
+        # Ask for strength next
+        session.pairing_waiting_for_strength = True
+        return _pairing_clarify_strength(session)
 
-    user_message = user_message or ""
-    text = user_message.strip()
-    t = _norm(text)
+    if session.pairing_waiting_for_strength:
+        session.pairing_strength = strength or msg
+        session.pairing_waiting_for_strength = False
+        return _pairing_result(session)
 
-    # ---- Context handle ----
-    ctx = session.context
+    # Fresh pairing request
+    # Try to pull spirit and strength
+    inferred_strength = strength
 
-    # Capture ZIP/location directly from the message (critical for HUNT gating)
-    z = extract_zip(text)
-    if z and not ctx.get("location_hint"):
-        ctx["location_hint"] = z
+    # crude spirit extraction: remove common pairing words
+    spirit_guess = re.sub(r"\b(pair|pairing|with|a|an|me|cigar|stick|smoke|for)\b", " ", msg, flags=re.I)
+    spirit_guess = re.sub(r"\s+", " ", spirit_guess).strip()
 
-    # If we have a pending clarify, try to resolve it first
-    if session.pending_clarify:
-        pending = session.pending_clarify
-        pending_type = pending.get("type")
+    if not spirit_guess:
+        session.pairing_waiting_for_spirit = True
+        return _pairing_clarify_spirit(session)
 
-        if pending_type == "hunt":
-            # update hunt intent from reply
-            ctx.update({k: v for k, v in extract_hunt_intent(text).items() if v})
-            # require location
-            if not ctx.get("location_hint"):
-                return coerce_to_sam_response(clarify_for_hunt(session))
-            # resolved
-            session.pending_clarify = None
-            return coerce_to_sam_response(_run_hunt(session, text))
+    session.pairing_spirit = spirit_guess
 
-        if pending_type == "pairing":
-            ctx.update({k: v for k, v in extract_pairing_intent(text).items() if v})
-            if not ctx.get("spirit_type") and not ctx.get("spirit_hint"):
-                return coerce_to_sam_response(clarify_for_pairing(session))
-            if not ctx.get("cigar_strength"):
-                return coerce_to_sam_response(clarify_for_pairing(session))
-            session.pending_clarify = None
-            return coerce_to_sam_response(_run_pairing(session, text))
+    if not inferred_strength:
+        session.pairing_waiting_for_strength = True
+        return _pairing_clarify_strength(session)
 
-        # Unknown pending clarify -> clear it
-        session.pending_clarify = None
-
-    # ---- Mode routing ----
-    if is_hunt_intent(text):
-        ctx.update({k: v for k, v in extract_hunt_intent(text).items() if v})
-
-        # Gate: must have location
-        if not ctx.get("location_hint"):
-            session.pending_clarify = {"type": "hunt"}
-            return coerce_to_sam_response(clarify_for_hunt(session))
-
-        return coerce_to_sam_response(_run_hunt(session, text))
-
-    if is_pairing_intent(text):
-        ctx.update({k: v for k, v in extract_pairing_intent(text).items() if v})
-
-        # Gate: must have spirit + strength
-        if not (ctx.get("spirit_type") or ctx.get("spirit_hint")) or not ctx.get("cigar_strength"):
-            session.pending_clarify = {"type": "pairing"}
-            return coerce_to_sam_response(clarify_for_pairing(session))
-
-        return coerce_to_sam_response(_run_pairing(session, text))
-
-    # Default INFO
-    return coerce_to_sam_response(_run_info(session, text))
+    session.pairing_strength = inferred_strength
+    return _pairing_result(session)
 
 
-# ===============================
-# Behaviors
-# ===============================
-
-def _run_info(session: SamSession, text: str) -> SamResponse:
-    # Simple, safe info response pattern
-    return SamResponse(
-        mode=SamMode.INFO.value,
-        summary="Tell me what you’re working with and what you want out of it, and I’ll guide you cleanly.",
-        key_points=[
-            "If you want a cigar pairing, say the spirit and desired cigar strength.",
-            "If you want an allocation hunt, include your ZIP or city/state.",
-        ],
-        item_list=[],
-        next_step="Try: 'pair a cigar with Eagle Rare' or '30344 best allocation shops'.",
-    )
+def _pairing_clarify_spirit(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("clarify")
+    r["summary"] = "I can do that, I just need the spirit you’re pairing with."
+    r["key_points"] = ["Tell me the bourbon/whiskey/rum you’re using."]
+    r["item_list"] = [
+        _item("Example", "Eagle Rare"),
+        _item("Example", "Wild Turkey 101"),
+    ]
+    r["next_step"] = "Reply with the spirit name."
+    return r
 
 
-def _run_pairing(session: SamSession, text: str) -> SamResponse:
-    ctx = session.context
-    spirit = (ctx.get("spirit_hint") or ctx.get("spirit_type") or "bourbon").title()
-    strength = (ctx.get("cigar_strength") or "medium").lower()
-
-    # Basic pairing logic (deterministic placeholders)
-    primary = Pairing(
-        cigar="Padron 2000 Maduro" if strength != "mild" else "Montecristo White",
-        strength=strength,
-        pour=f"{spirit}",
-        quality_tag="balanced",
-        why=[
-            "Sweetness and oak meet the wrapper’s cocoa notes.",
-            "Strength stays aligned so one doesn’t bully the other.",
-        ],
-    )
-
-    alt1 = Pairing(
-        cigar="Oliva Serie V" if strength in {"medium", "full"} else "Romeo y Julieta 1875",
-        strength=strength,
-        pour=f"{spirit}",
-        quality_tag="spice-forward",
-        why=[
-            "Pepper and cedar pop without washing the pour out.",
-        ],
-    )
-
-    return SamResponse(
-        mode=SamMode.PAIRING.value,
-        summary=f"Here’s a clean pairing for {spirit} with a {strength} cigar.",
-        primary_pairing=_pairing_to_dict(primary),
-        alternative_pairings=[_pairing_to_dict(alt1)],
-        key_points=[
-            "If your pour is high-proof, consider a slightly fuller cigar.",
-            "If you want sweeter, go Maduro wrapper.",
-        ],
-        item_list=[],
-        next_step="Tell me the exact bottle (or proof) and I’ll fine-tune the pick.",
-    )
+def _pairing_clarify_strength(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("clarify")
+    spirit = session.pairing_spirit or "that pour"
+    r["summary"] = f"Got it. For {spirit}, what cigar strength do you want?"
+    r["key_points"] = ["Pick one: mild, medium, or full."]
+    r["item_list"] = [
+        _item("Mild", "Creamy, smooth, low pepper"),
+        _item("Medium", "Balanced spice + sweetness"),
+        _item("Full", "Bold pepper, espresso, dark cocoa"),
+    ]
+    r["next_step"] = "Reply: mild / medium / full."
+    return r
 
 
-def _run_hunt(session: SamSession, text: str) -> SamResponse:
-    ctx = session.context
-    location = ctx.get("location_hint")
-    hunt_type = ctx.get("hunt_type") or "stores"
-    bottle = ctx.get("bottle_hint")
+def _pairing_result(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("pairing")
+    spirit = session.pairing_spirit or "your pour"
+    strength = (session.pairing_strength or "medium").lower()
 
-    # NOTE: Real store lookup / geo comes later. For now we return structured HUNT response.
-    # If bottle is present, add simple price guidance items.
-    items: List[Dict[str, str]] = []
-    targets: List[str] = []
+    r["summary"] = f"Here’s a clean pairing for {spirit} (target: {strength})."
 
-    if bottle:
-        targets.append(bottle)
-        items.append({"label": "Pricing", "value": "Tell me your state and I’ll give MSRP vs. typical shelf vs. secondary ranges."})
-        items.append({"label": "Tactic", "value": "Ask stores if they do raffles, loyalty allocations, or drop-day posts."})
+    # Very simple deterministic rules
+    if strength == "mild":
+        primary = _pairing(
+            cigar="Connecticut shade robusto",
+            strength="mild",
+            pour=spirit,
+            quality_tag="easy-sipper",
+            why=["Keeps the whiskey in front", "Cream + toasted nut notes match well"],
+        )
+        alt1 = _pairing(
+            cigar="Mild Ecuador Connecticut toro",
+            strength="mild",
+            pour=spirit,
+            quality_tag="smooth",
+            why=["More body without pepper overload"],
+        )
+        alt2 = _pairing(
+            cigar="Mild Cameroon wrapper",
+            strength="mild",
+            pour=spirit,
+            quality_tag="sweet-spice",
+            why=["Adds a little cinnamon sweetness"],
+        )
+    elif strength == "full":
+        primary = _pairing(
+            cigar="Nicaraguan ligero-forward toro",
+            strength="full",
+            pour=spirit,
+            quality_tag="bold",
+            why=["Pepper + oak can stand up to proof", "Dark cocoa / espresso bridge"],
+        )
+        alt1 = _pairing(
+            cigar="Maduro robusto",
+            strength="full",
+            pour=spirit,
+            quality_tag="dessert",
+            why=["Chocolate + caramel synergy"],
+        )
+        alt2 = _pairing(
+            cigar="Broadleaf maduro",
+            strength="full",
+            pour=spirit,
+            quality_tag="rich",
+            why=["Thick smoke, heavy sweetness"],
+        )
+    else:
+        primary = _pairing(
+            cigar="Habano wrapper robusto",
+            strength="medium",
+            pour=spirit,
+            quality_tag="balanced",
+            why=["Spice meets sweetness", "Won’t wash out the pour"],
+        )
+        alt1 = _pairing(
+            cigar="Medium-bodied Nicaraguan corona",
+            strength="medium",
+            pour=spirit,
+            quality_tag="clean",
+            why=["Sharper cedar profile"],
+        )
+        alt2 = _pairing(
+            cigar="Medium maduro toro",
+            strength="medium",
+            pour=spirit,
+            quality_tag="round",
+            why=["Adds dark sweetness without being heavy"],
+        )
 
-    summary = f"In {location}, here’s how I’d run the hunt." if location else "Here’s how I’d run the hunt."
+    r["primary_pairing"] = primary
+    r["alternative_pairings"] = [alt1, alt2]
+    r["key_points"] = [
+        "Take a small sip first, then a few puffs, then sip again.",
+        "If the cigar dominates, step down in strength.",
+    ]
 
-    key_points = [
+    # Optional: price guidance placeholder
+    r["item_list"] = [
+        _item("Budget tip", "If you want a cheaper version of the same profile, tell me your price ceiling."),
+    ]
+
+    r["next_step"] = "Tell me the exact cigar you have (or your budget) and I’ll tighten this to a specific stick."
+    return r
+
+
+# ------------------------------
+# HUNT
+# ------------------------------
+
+
+def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
+    # 1) If waiting for area, treat this as the area
+    if session.hunt_waiting_for_area:
+        session.hunt_area = _extract_zip(msg) or msg
+        session.hunt_waiting_for_area = False
+        # After area, ask for target
+        session.hunt_waiting_for_target = True
+        return _hunt_clarify_target(session)
+
+    # 2) If waiting for target bottle, treat this message as the target bottle
+    #    This is the key fix you called out.
+    if session.hunt_waiting_for_target:
+        session.hunt_target_bottle = msg
+        session.hunt_waiting_for_target = False
+        return _hunt_plan(session)
+
+    # Fresh hunt request
+    area = _extract_zip(msg) or session.hunt_area
+
+    if not area and not _looks_like_location(msg):
+        session.hunt_waiting_for_area = True
+        return _hunt_clarify_area(session)
+
+    # Store area
+    session.hunt_area = area or msg
+
+    # If the user provided “best allocation shops” without a bottle, we ask for a target
+    # but still give a quick plan.
+    if "best" in msg.lower() and "allocation" in msg.lower() and not session.hunt_target_bottle:
+        session.hunt_waiting_for_target = True
+        return _hunt_quick_plan_then_ask_target(session)
+
+    # If message looks like a bottle-only follow-up, ask area
+    if not area and session.hunt_area is None:
+        session.hunt_waiting_for_area = True
+        return _hunt_clarify_area(session)
+
+    # If we have area but no bottle, ask for bottle
+    if not session.hunt_target_bottle:
+        session.hunt_waiting_for_target = True
+        return _hunt_clarify_target(session)
+
+    # Otherwise, run hunt plan
+    return _hunt_plan(session)
+
+
+def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("clarify")
+    r["summary"] = "I can do this, I just need your hunt area and target."
+    r["key_points"] = [
+        "Send your ZIP or city/state.",
+        "Tell me if you want a specific bottle or just the best allocation shops.",
+    ]
+    r["item_list"] = [
+        _item("Example A", "30344 + Weller"),
+        _item("Example B", "Dallas, TX + best allocation shops"),
+    ]
+    r["next_step"] = "Reply with ZIP/city and either a bottle name or ‘best allocation shops’."
+    return r
+
+
+def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("clarify")
+    area = session.hunt_area or "your area"
+    r["summary"] = f"In {area}, what’s the target bottle (or do you want ‘best allocation shops’)?"
+    r["key_points"] = [
+        "Give me 1–3 targets, or say ‘best allocation shops’.",
+        "I’ll tailor the hunt plan around how these bottles typically drop.",
+    ]
+    r["item_list"] = [
+        _item("Target example", "Weller Special Reserve"),
+        _item("Target example", "Blanton’s"),
+        _item("Option", "best allocation shops"),
+    ]
+    r["next_step"] = "Reply with your target bottle."
+    return r
+
+
+def _hunt_quick_plan_then_ask_target(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("hunt")
+    area = session.hunt_area or "your area"
+    r["summary"] = f"In {area}, here’s how I’d run the hunt."
+    r["key_points"] = [
         "Availability changes fast, treat this like reconnaissance.",
         "Ask the allocation question directly, don’t dance around it.",
     ]
-
-    # Placeholder stops (empty by default) — keeps map hidden until you add lat/lng later.
-    stops: List[Dict[str, Any]] = []
-
-    next_step = "Reply with your target bottle" if hunt_type == "stores" and not bottle else "Want shops, raffles, or both?"
-
-    return SamResponse(
-        mode=SamMode.HUNT.value,
-        summary=summary,
-        key_points=key_points,
-        item_list=items,
-        next_step=next_step,
-        stops=stops,
-        target_bottles=targets,
-        store_targets=[],
-    )
+    r["next_step"] = "Reply with your target bottle."
+    return r
 
 
-# ===============================
-# Self-tests (optional)
-# ===============================
+def _hunt_plan(session: SamSession) -> Dict[str, Any]:
+    r = _blank_response("hunt")
+    area = session.hunt_area or "your area"
+    target = session.hunt_target_bottle or "your target"
 
-def _run_tests():
-    # 1) Router/gating should clarify on HUNT without location
-    s = SamSession()
-    r1 = coerce_to_sam_response(sam_engine("find rare allocations", s))
-    assert r1["mode"] == SamMode.CLARIFY.value
+    # Very lightweight “plan” response (real store lookup can come later)
+    r["summary"] = f"Alright. Hunt plan for {target} in {area}."
 
-    # 2) HUNT with ZIP in message should NOT clarify
-    s_zip = SamSession()
-    r2 = coerce_to_sam_response(sam_engine("30344 best allocation shops", s_zip))
-    assert r2["mode"] == SamMode.HUNT.value
+    r["key_points"] = [
+        "Call 3–5 top shops and ask their allocation process (raffle, list, drops).",
+        "Show up on delivery days, be consistent, don’t ask for favors on visit #1.",
+        "If it’s a lottery bottle, ask how to qualify and what counts (spend, visits, points).",
+    ]
 
-    # 3) Clarify resolution path should route back to HUNT
-    s2 = SamSession()
-    _ = sam_engine("find allocation shops near me", s2)
-    r3 = coerce_to_sam_response(sam_engine("30344 best allocation shops", s2))
-    assert r3["mode"] == SamMode.HUNT.value
+    r["item_list"] = [
+        _item("Ask this", "Do you do allocated bottles via raffle, list, or first-come drops?"),
+        _item("Ask this", "What day/time do deliveries usually land?"),
+        _item("Ask this", "What’s the fairest way to qualify here?"),
+    ]
 
-    # 4) Pairing should clarify if no spirit + strength
-    s3 = SamSession()
-    r4 = coerce_to_sam_response(sam_engine("pair me a cigar", s3))
-    assert r4["mode"] == SamMode.CLARIFY.value
+    # Placeholder stops: keep empty until you wire real map sourcing
+    r["stops"] = []
 
-    # 5) Pairing clarify reply should yield PAIRING
-    r5 = coerce_to_sam_response(sam_engine("bourbon medium", s3))
-    assert r5["mode"] == SamMode.PAIRING.value
+    r["target_bottles"] = [target]
+    r["store_targets"] = ["best-allocation-shops"]
+
+    r["next_step"] = "Tell me: (1) your exact bottle target, (2) your area, (3) how far you’ll drive."
+    return r
+
+
+# ==============================
+# Self-tests (run directly)
+# ==============================
+
+
+def _run_tests() -> None:
+    s = SamSession(user_id="t")
+
+    # 1) Default info
+    r1 = sam_engine("hello", s)
+    assert r1["voice"] == "sam"
+    assert r1["mode"] in ("info", "clarify")
+
+    # 2) Hunt asks for area if missing
+    s2 = SamSession(user_id="t2")
+    r2 = sam_engine("find allocation shops near me", s2)
+    assert r2["mode"] == "clarify"
+    assert s2.hunt_waiting_for_area is True
+
+    # 3) Provide area then target
+    r3 = sam_engine("30344", s2)
+    assert r3["mode"] == "clarify"
+    assert s2.hunt_waiting_for_target is True
+
+    # 4) KEY FIX: when waiting for target, next message becomes target and stays hunt
+    r4 = sam_engine("4 roses small batch", s2)
+    assert r4["mode"] == "hunt"
+    assert s2.hunt_target_bottle == "4 roses small batch"
+
+    # 5) Pairing clarify strength
+    s3 = SamSession(user_id="t3")
+    r5 = sam_engine("pair with Eagle Rare", s3)
+    assert r5["mode"] == "clarify"
+    assert s3.pairing_waiting_for_strength is True
+
+    r6 = sam_engine("medium", s3)
+    assert r6["mode"] == "pairing"
+    assert r6["primary_pairing"] is not None
 
 
 if __name__ == "__main__":
