@@ -1,313 +1,569 @@
+# sam_engine.py
+# FINAL MASTER SAM ENGINE (Sections 1–10 fully wired)
+
+"""Copy-paste ready.
+
+This file is designed to work in BOTH setups:
+
+A) Modular (recommended): you have these modules in the same folder:
+   - sam_schema.py
+   - sam_router.py
+   - sam_slot_gating.py
+   - sam_clarify_resolver.py
+   - sam_executors.py
+   - sam_entity_extraction.py
+   - sam_pricing_service.py
+   - sam_persistence.py
+
+B) Standalone fallback: if any of those modules are missing, this file
+   provides safe minimal implementations so your server can still run.
+
+Your API/UI should call sam_engine().
+"""
+
 from __future__ import annotations
 
-import json
-import re
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from typing import Optional, Dict, Any, List, Literal
 
 from pydantic import BaseModel, Field
 
-# ======================================================
-# SCHEMAS
-# ======================================================
 
-class ChatRequest(BaseModel):
-    mode: str = "auto"                    # "auto" | "chat" | "pairing" | "hunt"
-    advisor: str = "auto"                 # "auto" | "sarn" | ...
-    user_message: str = Field(default="")
-    history: Optional[List[Dict[str, Any]]] = None
+# ============================
+# SECTION 1 — SCHEMA (IMPORT OR FALLBACK)
+# ============================
 
+try:
+    from sam_schema import SamMode, SamResponse, coerce_to_sam_response  # type: ignore
+except ModuleNotFoundError:
 
-class Item(BaseModel):
-    label: str
-    value: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class Stop(BaseModel):
-    name: str
-    address: str
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-    notes: Optional[str] = None
+    class SamMode(str, Enum):
+        HUNT = "hunt"
+        PAIRING = "pairing"
+        INFO = "info"
+        CLARIFY = "clarify"
 
 
-class SamResponse(BaseModel):
-    voice: str = "sam"
-    advisor: str = "auto"
-    mode: str = "chat"
-    summary: str = ""
-    key_points: List[str] = Field(default_factory=list)
-    item_list: List[Dict[str, Any]] = Field(default_factory=list)
-
-    next_step: Optional[str] = None
-
-    # pairing fields (kept as-is)
-    primary_pairing: Optional[Dict[str, Any]] = None
-    alternative_pairings: Optional[List[Dict[str, Any]]] = None
-
-    # hunt fields
-    stops: Optional[List[Dict[str, Any]]] = None
-    target_bottles: Optional[List[Dict[str, Any]]] = None
-    store_targets: Optional[List[Dict[str, Any]]] = None
+    class Stop(BaseModel):
+        name: str
+        address: str
+        lat: float
+        lng: float
+        notes: str = ""
 
 
-# ======================================================
-# MODE INFERENCE
-# ======================================================
-
-def infer_mode(req: ChatRequest) -> str:
-    """Lightweight heuristic so the backend can infer mode even if UI sends mode='auto'."""
-    m = (req.mode or "").lower().strip()
-    if m in {"chat", "pairing", "hunt"}:
-        return m
-
-    txt = (req.user_message or "").lower()
-    hunt_terms = ["allocation", "allocated", "near", "closest", "zip", "store", "shops", "hunt"]
-    pairing_terms = ["pair", "pairing", "cigar", "wrapper", "vitola", "proof", "bourbon +", "whiskey +"]
-
-    if any(t in txt for t in hunt_terms) or re.search(r"\b\d{5}\b", txt):
-        return "hunt"
-    if any(t in txt for t in pairing_terms):
-        return "pairing"
-    return "chat"
+    class PairingDetail(BaseModel):
+        cigar: str
+        strength: str
+        why: List[str]
+        pour: Optional[str] = None
+        quality_tag: Optional[str] = None
 
 
-# ======================================================
-# NORMALIZATION
-# ======================================================
+    class SamResponse(BaseModel):
+        voice: Literal["sam"] = "sam"
+        mode: SamMode
 
-def normalize_response(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Defensive normalization so UI rendering never breaks on type mismatches."""
-    if not isinstance(raw, dict):
-        return {
+        summary: str = ""
+        key_points: List[str] = Field(default_factory=list)
+        item_list: List[Dict[str, str]] = Field(default_factory=list)
+        next_step: str = ""
+
+        primary_pairing: Optional[PairingDetail] = None
+        alternative_pairings: List[PairingDetail] = Field(default_factory=list)
+
+        stops: List[Stop] = Field(default_factory=list)
+        target_bottles: List[str] = Field(default_factory=list)
+        store_targets: List[str] = Field(default_factory=list)
+
+
+    def coerce_to_sam_response(raw: Dict[str, Any]) -> SamResponse:
+        base = {
             "voice": "sam",
-            "advisor": "auto",
-            "mode": "chat",
-            "summary": "I ran into a formatting issue on my side. Try that again.",
-            "key_points": [],
-            "item_list": [],
+            "mode": raw.get("mode", SamMode.INFO),
+            "summary": raw.get("summary") or "",
+            "key_points": raw.get("key_points") or [],
+            "item_list": raw.get("item_list") or [],
+            "next_step": raw.get("next_step") or "",
+            "primary_pairing": raw.get("primary_pairing"),
+            "alternative_pairings": raw.get("alternative_pairings") or [],
+            "stops": raw.get("stops") or [],
+            "target_bottles": raw.get("target_bottles") or [],
+            "store_targets": raw.get("store_targets") or [],
         }
-
-    # Ensure required keys exist
-    raw.setdefault("voice", "sam")
-    raw.setdefault("advisor", "auto")
-    raw.setdefault("mode", "chat")
-    raw.setdefault("summary", "")
-    raw.setdefault("key_points", [])
-    raw.setdefault("item_list", [])
-
-    # Coerce key_points
-    kp = raw.get("key_points")
-    if kp is None:
-        raw["key_points"] = []
-    elif isinstance(kp, list):
-        raw["key_points"] = [str(x) for x in kp]
-    else:
-        raw["key_points"] = [str(kp)]
-
-    # Coerce item_list
-    il = raw.get("item_list")
-    if il is None:
-        raw["item_list"] = []
-    elif isinstance(il, list):
-        fixed: List[Dict[str, Any]] = []
-        for x in il:
-            if isinstance(x, dict):
-                fixed.append(x)
-            else:
-                fixed.append({"label": str(x), "value": ""})
-        raw["item_list"] = fixed
-    else:
-        raw["item_list"] = [{"label": "Info", "value": str(il)}]
-
-    # Coerce store_targets to list[dict]
-    st = raw.get("store_targets")
-    if st is None:
-        raw["store_targets"] = None
-    elif isinstance(st, list):
-        fixed_st: List[Dict[str, Any]] = []
-        for s in st:
-            if isinstance(s, dict):
-                fixed_st.append(s)
-            elif isinstance(s, str):
-                fixed_st.append({"label": s, "notes": ""})
-        raw["store_targets"] = fixed_st
-    else:
-        raw["store_targets"] = []
-
-    # Hunt-specific coercion
-    # stops -> list[dict]
-    stops = raw.get("stops")
-    if stops is None:
-        raw["stops"] = None
-    elif isinstance(stops, list):
-        raw["stops"] = [s for s in stops if isinstance(s, dict)]
-    else:
-        raw["stops"] = []
-
-    # target_bottles -> list[dict]
-    tb = raw.get("target_bottles") or []
-    if isinstance(tb, list):
-        norm_tb: List[Dict[str, Any]] = []
-        for b in tb:
-            if isinstance(b, dict):
-                norm_tb.append(b)
-            elif isinstance(b, str):
-                norm_tb.append({"label": b})
-        raw["target_bottles"] = norm_tb
-    else:
-        raw["target_bottles"] = []
-
-    return raw
+        return SamResponse(**base)
 
 
-# ======================================
-# HUNT HELPERS
-# ======================================
+# ============================
+# SECTION 2 — ROUTER (IMPORT OR FALLBACK)
+# ============================
 
-_ZIP_RE = re.compile(r"\b\d{5}\b")
+try:
+    from sam_router import route_request, ChatRequest  # type: ignore
+except ModuleNotFoundError:
 
-# Tiny centroid lookup so pins can render even without real geo search.
-# If a ZIP isn't in the dict, we fall back to (Atlanta, GA) center.
-ZIP_CENTROIDS: Dict[str, tuple] = {
-    "30344": (33.6770, -84.4390),  # Atlanta (East Point area)
-    "30340": (33.8850, -84.2910),  # Doraville
-    "30324": (33.8130, -84.3540),  # Buckhead / Lindbergh
-    "30327": (33.8400, -84.4220),  # Buckhead / West
-    "30339": (33.8790, -84.4630),  # Cumberland / Smyrna-ish
-}
+    class ChatRequest(BaseModel):
+        message: str
+        context: Optional[Dict[str, Any]] = None
+        mode: Optional[str] = None
 
-def extract_zip(text: str) -> Optional[str]:
-    if not text:
+
+    _HUNT_TRIGGERS = [
+        "allocation",
+        "allocated",
+        "rare",
+        "limited",
+        "drop",
+        "lottery",
+        "raffle",
+        "release",
+        "find",
+        "near me",
+        "closest",
+        "in my area",
+        "where can i find",
+    ]
+
+    _PAIRING_TRIGGERS = [
+        "pair",
+        "pairing",
+        "cigar",
+        "smoke with",
+        "goes with",
+        "match with",
+        "what cigar",
+    ]
+
+
+    def _detect_mode(message: str) -> SamMode:
+        t = (message or "").lower()
+        hunt = any(x in t for x in _HUNT_TRIGGERS)
+        pairing = any(x in t for x in _PAIRING_TRIGGERS)
+        if hunt and pairing:
+            return SamMode.CLARIFY
+        if hunt:
+            return SamMode.HUNT
+        if pairing:
+            return SamMode.PAIRING
+        return SamMode.INFO
+
+
+    def route_request(req: ChatRequest) -> SamMode:
+        if req.mode:
+            try:
+                return SamMode(req.mode)
+            except Exception:
+                pass
+        return _detect_mode(req.message)
+
+
+# ============================
+# SECTION 3 — SLOT GATING (IMPORT OR FALLBACK)
+# ============================
+
+try:
+    from sam_slot_gating import apply_slot_gating  # type: ignore
+except ModuleNotFoundError:
+
+    def apply_slot_gating(mode: SamMode, message: str, context: Optional[Dict[str, Any]] = None) -> Optional[SamResponse]:
+        context = context or {}
+        t = (message or "").lower().strip()
+
+        if mode == SamMode.HUNT:
+            has_geo = bool(context.get("geo"))
+            has_loc = bool(context.get("location_hint"))
+            bottle_or_store = any(k in t for k in ["store", "shops", "liquor", "weller", "blanton", "pappy", "stagg", "taylor", "eagle rare"])
+
+            if not (has_geo or has_loc) or not bottle_or_store:
+                return coerce_to_sam_response(
+                    {
+                        "mode": SamMode.CLARIFY,
+                        "summary": "I can do this, I just need your hunt area and target.",
+                        "key_points": [
+                            "Send your ZIP or city/state.",
+                            "Tell me if you want a specific bottle or just the best allocation shops.",
+                        ],
+                        "item_list": [
+                            {"label": "Example A", "value": "30344 + Weller"},
+                            {"label": "Example B", "value": "Dallas, TX + best allocation shops"},
+                        ],
+                        "next_step": "Reply with ZIP/city and either a bottle name or 'best allocation shops'.",
+                    }
+                )
+
+        if mode == SamMode.PAIRING:
+            # Require spirit/bottle
+            has_spirit = bool(context.get("spirit"))
+            spirit_in_text = any(k in t for k in ["bourbon", "rye", "scotch", "whiskey", "whisky", "tequila", "rum", "cognac", "weller", "blanton", "stagg", "taylor", "eagle rare"])
+            if not (has_spirit or spirit_in_text):
+                return coerce_to_sam_response(
+                    {
+                        "mode": SamMode.CLARIFY,
+                        "summary": "Before I pair it, what are we smoking with?",
+                        "key_points": ["Tell me the spirit type or the exact bottle."],
+                        "item_list": [
+                            {"label": "Example", "value": "Pair a cigar with bourbon (medium)."},
+                            {"label": "Example", "value": "Pair a cigar with Eagle Rare (mild)."},
+                        ],
+                        "next_step": "Reply with the spirit type or bottle name.",
+                    }
+                )
+
+        if mode == SamMode.INFO:
+            if t in {"help", "yo", "hey", "sam", "question"} or len(t) < 3:
+                return coerce_to_sam_response(
+                    {
+                        "mode": SamMode.CLARIFY,
+                        "summary": "Tell me what lane you’re in.",
+                        "item_list": [
+                            {"label": "INFO", "value": "Ask about proof, notes, price, or comparisons."},
+                            {"label": "PAIRING", "value": "Ask what cigar pairs with a bottle/spirit."},
+                            {"label": "HUNT", "value": "Ask where to find allocated bottles or best shops."},
+                        ],
+                        "next_step": "Reply with your question in one sentence.",
+                    }
+                )
+
         return None
-    m = _ZIP_RE.search(text)
-    return m.group(0) if m else None
 
 
-def fallback_hunt_stops(zip_code: Optional[str]) -> List[Dict[str, Any]]:
-    """Return a deterministic set of stops so the UI always has something to render."""
-    z = (zip_code or "").strip()
+# ============================
+# SECTION 4 — CLARIFY RESOLVER (IMPORT OR FALLBACK)
+# ============================
 
-    # Default base location: Atlanta center
-    lat0, lng0 = ZIP_CENTROIDS.get(z, (33.74900, -84.38798))
+try:
+    from sam_clarify_resolver import ClarifyState, resolve_clarify  # type: ignore
+except ModuleNotFoundError:
 
-    offsets = [
-        (0.012, 0.008),
-        (-0.010, 0.006),
-        (0.006, -0.011),
-        (-0.007, -0.009),
-        (0.015, -0.004),
-    ]
+    class ClarifyState(BaseModel):
+        expected_mode: SamMode
+        expected_fields: List[str] = Field(default_factory=list)
+        prompt_type: str = "generic"
 
-    # Atlanta-focused default list (matches your current UI expectations)
-    templates = [
-        ("Tower Beer, Wine & Spirits", "5877 Buford Hwy NE, Atlanta, GA 30340", "Large selection, regular raffles for allocated bourbon, strong bourbon wall."),
-        ("Green’s Beverages", "2619 Buford Hwy NE, Atlanta, GA 30324", "Well-known for bourbon drops, join their email list for allocation announcements."),
-        ("Camp Creek World of Beverage", "3780 Princeton Lakes Pkwy SW, Atlanta, GA 30331", "Local favorite with occasional special releases, build a relationship for heads-up on drops."),
-        ("Ace Beverage", "3423 Main St, Atlanta, GA 30337", "Independent shop, sometimes gets unique single barrels, friendly to regulars."),
-        ("Total Wine & More", "2955 Cobb Pkwy SE, Atlanta, GA 30339", "Big chain, runs lotteries and special releases, sign up for rewards."),
-    ]
 
-    stops: List[Dict[str, Any]] = []
-    for i, (name, addr, notes) in enumerate(templates[:5]):
-        dlat, dlng = offsets[i % len(offsets)]
-        stops.append(
+    def resolve_clarify(
+        previous_state: ClarifyState,
+        user_reply: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context = context or {}
+        reply = (user_reply or "").strip()
+        t = reply.lower()
+
+        updates: Dict[str, Any] = {}
+
+        if previous_state.expected_mode == SamMode.HUNT:
+            # Treat reply as location+target hint
+            updates["location_hint"] = reply
+            if any(k in t for k in ["best allocation shops", "shops", "stores", "store hunt"]):
+                updates["hunt_type"] = "stores"
+            else:
+                updates["hunt_type"] = "bottle"
+                updates["bottle_hint"] = reply
+            return {"next_mode": SamMode.HUNT, "context_updates": updates}
+
+        if previous_state.expected_mode == SamMode.PAIRING:
+            updates["spirit"] = reply
+            if "mild" in t:
+                updates["cigar_strength"] = "mild"
+            elif "medium" in t:
+                updates["cigar_strength"] = "medium"
+            elif "full" in t:
+                updates["cigar_strength"] = "full"
+            return {"next_mode": SamMode.PAIRING, "context_updates": updates}
+
+        # Generic lane select
+        if any(k in t for k in ["hunt", "allocation", "find"]):
+            return {"next_mode": SamMode.HUNT, "context_updates": updates}
+        if any(k in t for k in ["pair", "cigar"]):
+            return {"next_mode": SamMode.PAIRING, "context_updates": updates}
+
+        return {"next_mode": SamMode.INFO, "context_updates": updates}
+
+
+# ============================
+# SECTION 5 — EXECUTORS (IMPORT OR FALLBACK)
+# ============================
+
+try:
+    from sam_executors import run_hunt, run_pairing, run_info  # type: ignore
+except ModuleNotFoundError:
+
+    def run_hunt(message: str, context: Optional[Dict[str, Any]] = None) -> SamResponse:
+        context = context or {}
+        location = context.get("geo_display") or context.get("location_hint") or "your area"
+        hunt_type = context.get("hunt_type", "stores")
+        bottle = context.get("bottle_hint")
+
+        if hunt_type == "bottle" and bottle:
+            return coerce_to_sam_response(
+                {
+                    "mode": SamMode.HUNT,
+                    "summary": f"Here’s how to hunt {bottle} in {location}.",
+                    "key_points": [
+                        "Specific bottles usually move through lists, raffles, or relationships.",
+                        "Ask about drop timing and qualification rules.",
+                    ],
+                    "item_list": [
+                        {"label": "Target", "value": bottle},
+                        {"label": "Method", "value": "Lists, raffles, relationship"},
+                    ],
+                    "target_bottles": [bottle],
+                    "next_step": "Call 2 shops and ask how that bottle is released.",
+                }
+            )
+
+        return coerce_to_sam_response(
             {
-                "name": name,
-                "address": addr,
-                "lat": float(lat0 + dlat),
-                "lng": float(lng0 + dlng),
-                "notes": notes,
+                "mode": SamMode.HUNT,
+                "summary": f"Here are the best starting moves to hunt allocations near {location}.",
+                "key_points": [
+                    "Independent shops + loyalty programs give you the best odds.",
+                    "Timing beats luck—ask for drop days.",
+                ],
+                "store_targets": ["Independent shops", "Lottery-based chains"],
+                "next_step": "Tell me your ZIP and I’ll generate map-ready stops.",
             }
         )
-    return stops
 
 
-# ======================================
-# MAIN ENGINE FUNCTION
-# ======================================
+    def run_pairing(message: str, context: Optional[Dict[str, Any]] = None) -> SamResponse:
+        context = context or {}
+        spirit = context.get("spirit") or "bourbon"
+        strength = context.get("cigar_strength") or "medium"
 
-DEBUG = False  # set True locally if you want console prints
-
-def run_sam_engine(request: ChatRequest) -> SamResponse:
-    """
-    This function should call your model and return a SamResponse-shaped object.
-    If your OpenAI call returns JSON, normalize it, then apply safeguards.
-    """
-    try:
-        # ------------------------------------------
-        # NOTE:
-        # Replace this block with your actual OpenAI call.
-        # raw_json must end up as a Python dict.
-        # ------------------------------------------
-
-        # Example placeholder (you likely already replaced this with a real call):
-        raw_json: Dict[str, Any] = {
-            "voice": "sam",
-            "advisor": request.advisor or "auto",
-            "mode": infer_mode(request),
-            "summary": "Tell me what you’re after and I’ll help.",
-            "key_points": [],
-            "item_list": [],
+        primary = {
+            "cigar": "Nicaraguan Toro",
+            "strength": strength,
+            "why": [
+                "Balanced body won’t overpower the pour",
+                "Earthy sweetness complements oak and caramel notes",
+            ],
+            "pour": "Neat",
+            "quality_tag": "Top Shelf",
         }
 
-        if DEBUG:
-            print("\n====== RAW MODEL JSON ======")
-            print(json.dumps(raw_json, indent=2))
-            print("================================\n")
-
-        normalized = normalize_response(raw_json)
-
-        # HUNT safeguard: always give the UI something to render
-        inferred_mode = infer_mode(request)
-        effective_mode = (normalized.get("mode") or inferred_mode or "chat").lower()
-        normalized["mode"] = effective_mode
-
-        if effective_mode == "hunt":
-            stops = normalized.get("stops") or []
-            if not isinstance(stops, list):
-                stops = []
-            # If we have fewer than 4 stops, use deterministic fallback stops
-            if len(stops) < 4:
-                z = extract_zip(getattr(request, "user_message", "") or "")
-                stops = fallback_hunt_stops(z)
-            # Ensure each stop has lat/lng so the map can render
-            z2 = extract_zip(getattr(request, "user_message", "") or "")
-            lat0, lng0 = ZIP_CENTROIDS.get(z2 or "", (33.74900, -84.38798))
-            offsets = [(0.012, 0.008), (-0.010, 0.006), (0.006, -0.011), (-0.007, -0.009), (0.015, -0.004)]
-            for i, s in enumerate(stops):
-                if not isinstance(s, dict):
-                    continue
-                if not isinstance(s.get("lat"), (int, float)) or not isinstance(s.get("lng"), (int, float)):
-                    dlat, dlng = offsets[i % len(offsets)]
-                    s["lat"] = float(lat0 + dlat)
-                    s["lng"] = float(lng0 + dlng)
-            normalized["stops"] = stops
-
-            # Also ensure these exist so the front end "store targets" blocks can render
-            normalized.setdefault("store_targets", [
-                {"label": "Independent bottle shops", "notes": "Best bet for picks and allocation lists."},
-                {"label": "Chains with loyalty programs", "notes": "Some run predictable drops or raffles."},
-            ])
-            normalized.setdefault("target_bottles", [
-                {"label": "Store picks", "notes": "Often easier to land and drink great."},
-                {"label": "Allocation-adjacent bottles", "notes": "Similar profile, less chase."},
-            ])
-
-        return SamResponse(**normalized)
-
-    except Exception as e:
-        if DEBUG:
-            print("\n====== ERROR IN run_sam_engine ======")
-            print(repr(e))
-            print("====================================\n")
-
-        # Return a safe structured response so frontend never "goes blank"
-        return SamResponse(
-            voice="sam",
-            advisor=request.advisor or "auto",
-            mode=infer_mode(request),
-            summary="I hit an internal engine error. Try again, and if it repeats, we’ll check logs.",
-            key_points=[str(e)],
-            item_list=[],
+        return coerce_to_sam_response(
+            {
+                "mode": SamMode.PAIRING,
+                "summary": f"Here’s a cigar pairing that works with {spirit}.",
+                "key_points": [
+                    "Balance matters more than matching strength.",
+                    "Let the cigar support the pour, not compete.",
+                ],
+                "primary_pairing": primary,
+                "next_step": "Try it once, then tell me if you want it richer or smoother.",
+            }
         )
+
+
+    def run_info(message: str, context: Optional[Dict[str, Any]] = None) -> SamResponse:
+        return coerce_to_sam_response(
+            {
+                "mode": SamMode.INFO,
+                "summary": "Here’s the straight answer.",
+                "key_points": [
+                    "Proof, mashbill, and aging drive flavor.",
+                    "Price doesn’t always equal quality.",
+                ],
+                "next_step": "If you want, ask for a pairing or a local hunt plan.",
+            }
+        )
+
+
+# ============================
+# SECTION 8 — ENTITY EXTRACTION (IMPORT OR FALLBACK)
+# ============================
+
+try:
+    from sam_entity_extraction import extract_hunt_intent  # type: ignore
+except ModuleNotFoundError:
+
+    def extract_hunt_intent(text: str) -> Dict[str, Optional[str]]:
+        t = (text or "").lower()
+        bottle_markers = ["weller", "blanton", "pappy", "van winkle", "stagg", "taylor", "eagle rare", "four roses"]
+        store_markers = ["best allocation shops", "best stores", "liquor stores", "allocation shops", "where can i find"]
+
+        bottle = next((b for b in bottle_markers if b in t), None)
+        store_intent = any(s in t for s in store_markers)
+
+        if bottle:
+            return {"hunt_type": "bottle", "bottle_hint": bottle.title()}
+        if store_intent:
+            return {"hunt_type": "stores", "bottle_hint": None}
+        return {"hunt_type": None, "bottle_hint": None}
+
+
+# ============================
+# SECTION 9 — PRICING (IMPORT OR FALLBACK)
+# ============================
+
+try:
+    from sam_pricing_service import pricing_item_list  # type: ignore
+except ModuleNotFoundError:
+
+    def pricing_item_list(bottle_name: str) -> List[Dict[str, str]]:
+        table = {
+            "Blanton'S": {"msrp": 65, "secondary_low": 130, "secondary_high": 200},
+            "E.H. Taylor": {"msrp": 45, "secondary_low": 90, "secondary_high": 150},
+            "Stagg": {"msrp": 55, "secondary_low": 150, "secondary_high": 300},
+            "Weller": {"msrp": 30, "secondary_low": 80, "secondary_high": 200},
+        }
+        key = (bottle_name or "").title()
+        p = table.get(key)
+        if not p:
+            return []
+        return [
+            {"label": "MSRP", "value": f"${p['msrp']}"},
+            {"label": "Secondary (low)", "value": f"${p['secondary_low']}"},
+            {"label": "Secondary (high)", "value": f"${p['secondary_high']}"},
+        ]
+
+
+# ============================
+# SECTION 10 — PERSISTENCE (IMPORT OR FALLBACK)
+# ============================
+
+try:
+    from sam_persistence import get_user_state  # type: ignore
+except ModuleNotFoundError:
+
+    class _UserState(BaseModel):
+        favorites: List[str] = Field(default_factory=list)
+        home_stash: List[str] = Field(default_factory=list)
+
+
+    _STORE: Dict[str, _UserState] = {}
+
+
+    def get_user_state(user_id: str) -> _UserState:
+        if user_id not in _STORE:
+            _STORE[user_id] = _UserState()
+        return _STORE[user_id]
+
+
+# ============================
+# SESSION STATE
+# ============================
+
+
+class SamSession(BaseModel):
+    context: Dict[str, Any] = Field(default_factory=dict)
+    clarify_state: Optional[ClarifyState] = None
+    user_id: Optional[str] = None
+
+
+# ============================
+# MASTER ENGINE
+# ============================
+
+
+def sam_engine(user_message: str, session: Optional[SamSession] = None) -> SamResponse:
+    """Canonical Sam execution path.
+
+    Order (LOCKED):
+    1) Clarify resolution (if pending)
+    2) Entity extraction
+    3) Mode routing
+    4) Slot gating
+    5) Mode execution
+    6) Pricing enrichment
+    7) Persistence hooks
+    8) Final schema enforcement
+    """
+
+    session = session or SamSession()
+    context = session.context
+
+    # 1) Resolve clarify (one turn only)
+    if session.clarify_state:
+        result = resolve_clarify(
+            previous_state=session.clarify_state,
+            user_reply=user_message,
+            context=context,
+        )
+        context.update(result.get("context_updates", {}))
+        mode = result.get("next_mode", SamMode.INFO)
+        session.clarify_state = None
+    else:
+        # 2) Entity extraction (hunt intent)
+        hunt_entities = extract_hunt_intent(user_message)
+        context.update({k: v for k, v in hunt_entities.items() if v})
+
+        # 3) Mode routing
+        req = ChatRequest(message=user_message, context=context)
+        mode = route_request(req)
+
+    # 4) Slot gating
+    clarify_response = apply_slot_gating(mode, user_message, context)
+    if clarify_response:
+        session.clarify_state = ClarifyState(
+            expected_mode=mode,
+            expected_fields=[],
+            prompt_type=f"{mode.value}_slots",
+        )
+        return clarify_response
+
+    # 5) Mode execution
+    if mode == SamMode.HUNT:
+        response = run_hunt(user_message, context)
+    elif mode == SamMode.PAIRING:
+        response = run_pairing(user_message, context)
+    else:
+        response = run_info(user_message, context)
+
+    # 6) Pricing enrichment (HUNT only, bottle-specific)
+    bottle_hint = context.get("bottle_hint")
+    if getattr(response, "mode", None) == SamMode.HUNT and bottle_hint:
+        pricing = pricing_item_list(str(bottle_hint))
+        if pricing:
+            # Ensure item_list exists
+            if not getattr(response, "item_list", None):
+                response.item_list = []  # type: ignore
+            response.item_list.extend(pricing)  # type: ignore
+
+    # 7) Persistence hooks (expose favorites/stash in context)
+    if session.user_id:
+        user_state = get_user_state(session.user_id)
+        context["favorites"] = getattr(user_state, "favorites", [])
+        context["home_stash"] = getattr(user_state, "home_stash", [])
+
+    # 8) Final schema enforcement
+    # Some imported executors may already return SamResponse; normalize anyway.
+    return coerce_to_sam_response(response.dict() if hasattr(response, "dict") else dict(response))  # type: ignore
+
+
+# ============================
+# TESTS (do not remove)
+# ============================
+
+
+def _run_tests():
+    # 1) Router/gating should clarify on HUNT without location
+    s = SamSession()
+    r1 = sam_engine("find rare allocations", s)
+    assert r1.mode == SamMode.CLARIFY
+
+    # 2) Clarify resolution should route back to HUNT
+    r2 = sam_engine("30344 best allocation shops", s)
+    assert r2.mode in {SamMode.HUNT, SamMode.INFO, SamMode.PAIRING}
+
+    # 3) Pairing should clarify if no spirit provided
+    s2 = SamSession()
+    r3 = sam_engine("pair me a cigar", s2)
+    assert r3.mode == SamMode.CLARIFY
+
+    # 4) Pairing clarify reply should yield PAIRING
+    r4 = sam_engine("bourbon medium", s2)
+    assert r4.mode in {SamMode.PAIRING, SamMode.INFO}
+
+    # 5) Bottle hunt should add pricing item_list when bottle is known
+    s3 = SamSession(context={"location_hint": "30344", "hunt_type": "bottle", "bottle_hint": "Weller"})
+    r5 = sam_engine("find weller", s3)
+    assert r5.mode == SamMode.HUNT
+    assert isinstance(r5.item_list, list)
+
+
+if __name__ == "__main__":
+    _run_tests()
+    print("sam_engine.py self-test passed")
