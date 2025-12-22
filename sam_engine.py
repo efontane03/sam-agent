@@ -16,7 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Literal, Tuple
 import re
-
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
 
 # ==============================
 # Locked schema helpers
@@ -62,6 +65,136 @@ def _stop(
         out["lat"] = float(lat)
         out["lng"] = float(lng)
     return out
+# ==============================
+# Lightweight map sourcing (OSM)
+# ==============================
+
+_OSM_UA = "SamBourbonCaddie/1.0 (contact: local-dev)"  # keep a UA for OSM services
+
+
+def _http_get_json(url: str, timeout: int = 8) -> Any:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": _OSM_UA,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    return json.loads(raw)
+
+
+def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
+    # Nominatim: https://nominatim.openstreetmap.org/search?format=json&q=...
+    params = {
+        "format": "json",
+        "q": q,
+        "limit": "1",
+    }
+    url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(params)
+    try:
+        data = _http_get_json(url, timeout=8)
+        if not data:
+            return None
+        lat = float(data[0]["lat"])
+        lng = float(data[0]["lon"])
+        name = str(data[0].get("display_name", q))
+        return lat, lng, name
+    except Exception:
+        return None
+
+
+def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8) -> List[Dict[str, Any]]:
+    # Overpass API query for liquor stores around a point
+    # We primarily use shop=alcohol, and include shop=beverages as a fallback.
+    query = f"""
+    [out:json][timeout:10];
+    (
+      node["shop"="alcohol"](around:{radius_m},{lat},{lng});
+      way["shop"="alcohol"](around:{radius_m},{lat},{lng});
+      relation["shop"="alcohol"](around:{radius_m},{lat},{lng});
+      node["shop"="beverages"](around:{radius_m},{lat},{lng});
+      way["shop"="beverages"](around:{radius_m},{lat},{lng});
+      relation["shop"="beverages"](around:{radius_m},{lat},{lng});
+    );
+    out center {limit};
+    """
+    url = "https://overpass-api.de/api/interpreter"
+    try:
+        # Overpass is POST-friendly, but GET works if small. We'll do POST.
+        body = urllib.parse.urlencode({"data": query}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "User-Agent": _OSM_UA,
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw)
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for el in data.get("elements", []):
+        tags = el.get("tags", {}) or {}
+
+        name = str(tags.get("name") or "Liquor Store")
+        # IMPORTANT: do NOT prefix "Stop X —" here; the UI already does that.
+        addr_parts = []
+        if tags.get("addr:housenumber"):
+            addr_parts.append(str(tags["addr:housenumber"]))
+        if tags.get("addr:street"):
+            addr_parts.append(str(tags["addr:street"]))
+        if tags.get("addr:city"):
+            addr_parts.append(str(tags["addr:city"]))
+        if tags.get("addr:state"):
+            addr_parts.append(str(tags["addr:state"]))
+        if tags.get("addr:postcode"):
+            addr_parts.append(str(tags["addr:postcode"]))
+        address = " ".join(addr_parts).strip()
+
+        notes = "Call and ask about allocation process (raffle, list, drops)."
+
+        # node has lat/lon, ways/relations have center
+        el_lat = el.get("lat")
+        el_lng = el.get("lon")
+        center = el.get("center") or {}
+        if el_lat is None:
+            el_lat = center.get("lat")
+        if el_lng is None:
+            el_lng = center.get("lon")
+
+        if isinstance(el_lat, (int, float)) and isinstance(el_lng, (int, float)):
+            out.append(_stop(name=name, address=address, notes=notes, lat=float(el_lat), lng=float(el_lng)))
+
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
+    # Returns (resolved_area_label, stops)
+    hint = str(area_hint or "").strip()
+    if not hint:
+        hint = "Atlanta, GA"
+
+    geo = _nominatim_geocode(hint)
+    if not geo:
+        # fallback to Atlanta center
+        lat, lng, label = 33.7490, -84.3880, hint
+        return label, []
+
+    lat, lng, label = geo
+    stops = _overpass_liquor_stores(lat, lng, radius_m=8000, limit=8)
+    return label, stops
 
 
 def _pairing(
@@ -470,7 +603,8 @@ def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
 
 
 def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("clarify")
+    r = _blank_response("hunt")
+
     r["summary"] = "I can do this, I just need your hunt area and target."
     r["key_points"] = [
         "Send your ZIP or city/state.",
@@ -485,7 +619,8 @@ def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
 
 
 def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("clarify")
+    r = _blank_response("hunt")
+
     area = session.hunt_area or "your area"
     r["summary"] = f"In {area}, what’s the target bottle (or do you want ‘best allocation shops’)?"
     r["key_points"] = [
@@ -575,7 +710,7 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
             "lng": center_lng + 0.008,
         },
         {
-            "name": "Stop 4 — High-Turnover Liquor Store (Stub)",
+           "name": "High-Turnover Liquor Store (Stub)",
             "address": f"Near {loc_hint or area}",
             "notes": "Check early on delivery mornings.",
             "lat": center_lat - 0.012,
