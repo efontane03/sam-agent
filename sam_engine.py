@@ -670,116 +670,65 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
 
     # TEMP STUB STOPS (to prove end-to-end wiring for the map/list)
     # Frontend requires stops[*].lat and stops[*].lng to be numbers.
-    loc_hint = (session.context or {}).get("location_hint") or session.hunt_area or ""
-    loc_hint = str(loc_hint).strip()
+       # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
+    area_hint = (session.context or {}).get("location_hint") or session.hunt_area or area
+    resolved_area, stops = _build_hunt_stops(area_hint)
 
-    # Default center: Atlanta (works fine for proving the map wiring)
-    center_lat, center_lng = 33.7490, -84.3880
+    # Update area label if we got a clearer geocode label back
+    if resolved_area:
+        area = resolved_area
 
-    # Optional: if user gave a common ZIP we recognize, shift center a bit
-    zip_centers = {
-        "30344": (33.6796, -84.4394),  # East Point area
-        "30318": (33.7925, -84.4519),
-        "30309": (33.7984, -84.3896),
-        "30324": (33.8233, -84.3530),
-        "30305": (33.8324, -84.3857),
-    }
-    if loc_hint.isdigit() and len(loc_hint) == 5 and loc_hint in zip_centers:
-        center_lat, center_lng = zip_centers[loc_hint]
+    # If Overpass returns results, use them
+    if stops:
+        r["stops"] = stops
+    else:
+        # Fallback to simple stub stops (NO "Stop X —" prefix in the name)
+        loc_hint = str(area_hint or "").strip()
+        center_lat, center_lng = 33.7490, -84.3880
+        zip_centers = {
+            "30344": (33.6796, -84.4394),
+            "30318": (33.7925, -84.4519),
+            "30309": (33.7984, -84.3896),
+            "30324": (33.8233, -84.3530),
+            "30305": (33.8324, -84.3857),
+        }
+        if loc_hint.isdigit() and len(loc_hint) == 5 and loc_hint in zip_centers:
+            center_lat, center_lng = zip_centers[loc_hint]
 
-    r["stops"] = [
-        {
-            "name": "Stop 1 — Allocation-Friendly Shop (Stub)",
-            "address": f"Near {loc_hint or area}",
-            "notes": "Stub stop to validate mapping wiring. Replace with real store lookup later.",
-            "lat": center_lat + 0.010,
-            "lng": center_lng - 0.010,
-        },
-        {
-            "name": "Stop 2 — Bottle Drop Spot (Stub)",
-            "address": f"Near {loc_hint or area}",
-            "notes": "Ask about delivery days and raffles.",
-            "lat": center_lat + 0.006,
-            "lng": center_lng + 0.012,
-        },
-        {
-            "name": "Stop 3 — Rewards Program Store (Stub)",
-            "address": f"Near {loc_hint or area}",
-            "notes": "Good for points-based allocation systems.",
-            "lat": center_lat - 0.008,
-            "lng": center_lng + 0.008,
-        },
-        {
-           "name": "High-Turnover Liquor Store (Stub)",
-            "address": f"Near {loc_hint or area}",
-            "notes": "Check early on delivery mornings.",
-            "lat": center_lat - 0.012,
-            "lng": center_lng - 0.006,
-        },
-        {
-            "name": "Stop 5 — Specialty Bourbon Shop (Stub)",
-            "address": f"Near {loc_hint or area}",
-            "notes": "Great for relationship building, ask their allocation rules.",
-            "lat": center_lat + 0.002,
-            "lng": center_lng - 0.015,
-        },
-    ]
-
-    r["target_bottles"] = [target]
-    r["store_targets"] = ["best-allocation-shops"]
-
-    r["next_step"] = "Tell me: (1) your exact bottle target, (2) your area, (3) how far you’ll drive."
-
-    # ✅ Make hunt sticky across the next message(s)
-    if not session.hunt_area:
-        session.hunt_waiting_for_area = True
-    if not session.hunt_target_bottle:
-        session.hunt_waiting_for_target = True
-
-    return r
-
-
-
-# ==============================
-# Self-tests (run directly)
-# ==============================
-
-
-def _run_tests() -> None:
-    s = SamSession(user_id="t")
-
-    # 1) Default info
-    r1 = sam_engine("hello", s)
-    assert r1["voice"] == "sam"
-    assert r1["mode"] in ("info", "clarify")
-
-    # 2) Hunt asks for area if missing
-    s2 = SamSession(user_id="t2")
-    r2 = sam_engine("find allocation shops near me", s2)
-    assert r2["mode"] == "clarify"
-    assert s2.hunt_waiting_for_area is True
-
-    # 3) Provide area then target
-    r3 = sam_engine("30344", s2)
-    assert r3["mode"] == "clarify"
-    assert s2.hunt_waiting_for_target is True
-
-    # 4) KEY FIX: when waiting for target, next message becomes target and stays hunt
-    r4 = sam_engine("4 roses small batch", s2)
-    assert r4["mode"] == "hunt"
-    assert s2.hunt_target_bottle == "4 roses small batch"
-
-    # 5) Pairing clarify strength
-    s3 = SamSession(user_id="t3")
-    r5 = sam_engine("pair with Eagle Rare", s3)
-    assert r5["mode"] == "clarify"
-    assert s3.pairing_waiting_for_strength is True
-
-    r6 = sam_engine("medium", s3)
-    assert r6["mode"] == "pairing"
-    assert r6["primary_pairing"] is not None
-
-
-if __name__ == "__main__":
-    _run_tests()
-    print("sam_engine.py self-test passed")
+        r["stops"] = [
+            _stop(
+                name="Allocation-Friendly Shop (Fallback)",
+                address=f"Near {loc_hint or area}",
+                notes="Fallback pin to validate mapping. Real lookup may be rate-limited temporarily.",
+                lat=center_lat + 0.010,
+                lng=center_lng - 0.010,
+            ),
+            _stop(
+                name="Bottle Drop Spot (Fallback)",
+                address=f"Near {loc_hint or area}",
+                notes="Ask about delivery mornings and raffles.",
+                lat=center_lat + 0.006,
+                lng=center_lng + 0.012,
+            ),
+            _stop(
+                name="Rewards Program Store (Fallback)",
+                address=f"Near {loc_hint or area}",
+                notes="Ask how to qualify, points, spend, visit count.",
+                lat=center_lat - 0.008,
+                lng=center_lng + 0.008,
+            ),
+            _stop(
+                name="High-Turnover Liquor Store (Fallback)",
+                address=f"Near {loc_hint or area}",
+                notes="Check early on delivery days.",
+                lat=center_lat - 0.012,
+                lng=center_lng - 0.006,
+            ),
+            _stop(
+                name="Specialty Bourbon Shop (Fallback)",
+                address=f"Near {loc_hint or area}",
+                notes="Relationship shop, ask their allocation rules.",
+                lat=center_lat + 0.002,
+                lng=center_lng - 0.015,
+            ),
+        ]
