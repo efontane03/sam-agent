@@ -330,36 +330,43 @@ def _normalize_strength(text: str) -> Optional[str]:
 def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
     """Main entry. Always returns a dict following the locked schema."""
 
-    msg = (message or "").strip()
-    t = msg.lower()
+    try:
+        msg = (message or "").strip()
+        t = msg.lower()
 
-    # Merge optional context the UI might send
-    # (FastAPI main.py already does session.context.update(payload.context))
-    # but we tolerate additional nesting.
-    if isinstance(session.context, dict):
-        # Some UIs pass {"location_hint": "30344"}
-        loc_hint = session.context.get("location_hint")
-        if isinstance(loc_hint, str) and loc_hint.strip():
-            session.hunt_area = session.hunt_area or loc_hint.strip()
+        # Merge optional context the UI might send
+        # (FastAPI main.py already does session.context.update(payload.context))
+        # but we tolerate additional nesting.
+        if isinstance(session.context, dict):
+            # Some UIs pass {"location_hint": "30344"}
+            loc_hint = session.context.get("location_hint")
+            if isinstance(loc_hint, str) and loc_hint.strip():
+                session.hunt_area = session.hunt_area or loc_hint.strip()
 
-    # Determine mode
-    mode: SamMode = _infer_mode(msg, session)
+        # Determine mode
+        mode: SamMode = _infer_mode(msg, session)
 
-    # Route
-    if mode == "hunt":
-        resp = _handle_hunt(msg, session)
-    elif mode == "pairing":
-        resp = _handle_pairing(msg, session)
-    else:
-        resp = _handle_info(msg, session)
+        # Route
+        if mode == "hunt":
+            resp = _handle_hunt(msg, session)
+        elif mode == "pairing":
+            resp = _handle_pairing(msg, session)
+        else:
+            resp = _handle_info(msg, session)
 
-    # Persist last_mode
-    session.last_mode = resp.get("mode", mode)  # type: ignore
+        # Persist last_mode
+        session.last_mode = resp.get("mode", mode)  # type: ignore
 
-    # Ensure schema completeness + JSON-serializable
-    base = _blank_response(resp.get("mode", mode))
-    base.update(resp)
-    return _coerce_jsonable(base)
+        # Ensure schema completeness + JSON-serializable
+        base = _blank_response(resp.get("mode", mode))
+        base.update(resp)
+        return _coerce_jsonable(base)
+
+    except Exception as e:
+        base = _blank_response("chat")
+        base["summary"] = f"Engine error: {type(e).__name__}: {e}"
+        base["next_step"] = "Retry your message. If it repeats, check Railway logs for the stack trace."
+        return _coerce_jsonable(base)
 
 
 # ------------------------------
