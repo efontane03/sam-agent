@@ -138,14 +138,21 @@ def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit:
         with urllib.request.urlopen(req, timeout=12) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         data = json.loads(raw)
-    except Exception:
-        return []
+        if not isinstance(data, dict):
+            return []
 
-    out: List[Dict[str, Any]] = []
-    for el in data.get("elements", []):
-        tags = el.get("tags", {}) or {}
+        results = []
+        for el in data.get("elements", []):
+            if not isinstance(el, dict):
+                continue
 
-        name = str(tags.get("name") or "Liquor Store")
+            tags = el.get("tags") or {}
+            name = tags.get("name", "Liquor Store")
+            lat = el.get("lat")
+            lng = el.get("lon")
+            if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+                results.append((name, float(lat), float(lng)))
+
         # IMPORTANT: do NOT prefix "Stop X —" here; the UI already does that.
         addr_parts = []
         if tags.get("addr:housenumber"):
