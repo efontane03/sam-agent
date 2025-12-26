@@ -65,6 +65,8 @@ def _stop(
         out["lat"] = float(lat)
         out["lng"] = float(lng)
     return out
+
+
 # ==============================
 # Lightweight map sourcing (OSM)
 # ==============================
@@ -106,7 +108,7 @@ def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
         return None
 
 
-def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8) -> List[Dict[str, Any]]:
+def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
     # Overpass API query for liquor stores around a point
     # We primarily use shop=alcohol, and include shop=beverages as a fallback.
     query = f"""
@@ -122,6 +124,7 @@ def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit:
     out center {limit};
     """
     url = "https://overpass-api.de/api/interpreter"
+    out = []
     try:
         # Overpass is POST-friendly, but GET works if small. We'll do POST.
         body = urllib.parse.urlencode({"data": query}).encode("utf-8")
@@ -141,48 +144,45 @@ def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit:
         if not isinstance(data, dict):
             return []
 
-        results = []
         for el in data.get("elements", []):
             if not isinstance(el, dict):
                 continue
 
             tags = el.get("tags") or {}
             name = tags.get("name", "Liquor Store")
-            lat = el.get("lat")
-            lng = el.get("lon")
-            if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
-                results.append((name, float(lat), float(lng)))
 
-        # IMPORTANT: do NOT prefix "Stop X —" here; the UI already does that.
-        addr_parts = []
-        if tags.get("addr:housenumber"):
-            addr_parts.append(str(tags["addr:housenumber"]))
-        if tags.get("addr:street"):
-            addr_parts.append(str(tags["addr:street"]))
-        if tags.get("addr:city"):
-            addr_parts.append(str(tags["addr:city"]))
-        if tags.get("addr:state"):
-            addr_parts.append(str(tags["addr:state"]))
-        if tags.get("addr:postcode"):
-            addr_parts.append(str(tags["addr:postcode"]))
-        address = " ".join(addr_parts).strip()
+            # IMPORTANT: do NOT prefix "Stop X —" here; the UI already does that.
+            addr_parts = []
+            if tags.get("addr:housenumber"):
+                addr_parts.append(str(tags["addr:housenumber"]))
+            if tags.get("addr:street"):
+                addr_parts.append(str(tags["addr:street"]))
+            if tags.get("addr:city"):
+                addr_parts.append(str(tags["addr:city"]))
+            if tags.get("addr:state"):
+                addr_parts.append(str(tags["addr:state"]))
+            if tags.get("addr:postcode"):
+                addr_parts.append(str(tags["addr:postcode"]))
+            address = " ".join(addr_parts).strip()
 
-        notes = "Call and ask about allocation process (raffle, list, drops)."
+            notes = "Call and ask about allocation process (raffle, list, drops)."
 
-        # node has lat/lon, ways/relations have center
-        el_lat = el.get("lat")
-        el_lng = el.get("lon")
-        center = el.get("center") or {}
-        if el_lat is None:
-            el_lat = center.get("lat")
-        if el_lng is None:
-            el_lng = center.get("lon")
+            # node has lat/lon, ways/relations have center
+            el_lat = el.get("lat")
+            el_lng = el.get("lon")
+            center = el.get("center") or {}
+            if el_lat is None:
+                el_lat = center.get("lat")
+            if el_lng is None:
+                el_lng = center.get("lon")
 
-        if isinstance(el_lat, (int, float)) and isinstance(el_lng, (int, float)):
-            out.append(_stop(name=name, address=address, notes=notes, lat=float(el_lat), lng=float(el_lng)))
+            if isinstance(el_lat, (int, float)) and isinstance(el_lng, (int, float)):
+                out.append(_stop(name=name, address=address, notes=notes, lat=float(el_lat), lng=float(el_lng)))
 
-        if len(out) >= limit:
-            break
+            if len(out) >= limit:
+                break
+    except Exception:
+        pass
 
     return out
 
@@ -370,7 +370,7 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         return _coerce_jsonable(base)
 
     except Exception as e:
-        base = _blank_response("chat")
+        base = _blank_response("info")
         base["summary"] = f"Engine error: {type(e).__name__}: {e}"
         base["next_step"] = "Retry your message. If it repeats, check Railway logs for the stack trace."
         return _coerce_jsonable(base)
@@ -385,13 +385,13 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     r = _blank_response("info")
 
     r["summary"] = (
-        "Tell me what you’re working with and what you want out of it, and I’ll guide you cleanly."
+        "Tell me what you're working with and what you want out of it, and I'll guide you cleanly."
     )
     r["key_points"] = [
         "If you want a cigar pairing, say the spirit and desired cigar strength.",
         "If you want an allocation hunt, include your ZIP or city/state.",
     ]
-    r["next_step"] = "Try: ‘pair a cigar with Eagle Rare’ or ‘30344 best allocation shops’."
+    r["next_step"] = "Try: 'pair a cigar with Eagle Rare' or '30344 best allocation shops'."
 
     # Light personalization using stash if present
     stash = None
@@ -450,8 +450,8 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
 
 def _pairing_clarify_spirit(session: SamSession) -> Dict[str, Any]:
     r = _blank_response("clarify")
-    r["summary"] = "I can do that, I just need the spirit you’re pairing with."
-    r["key_points"] = ["Tell me the bourbon/whiskey/rum you’re using."]
+    r["summary"] = "I can do that, I just need the spirit you're pairing with."
+    r["key_points"] = ["Tell me the bourbon/whiskey/rum you're using."]
     r["item_list"] = [
         _item("Example", "Eagle Rare"),
         _item("Example", "Wild Turkey 101"),
@@ -479,7 +479,7 @@ def _pairing_result(session: SamSession) -> Dict[str, Any]:
     spirit = session.pairing_spirit or "your pour"
     strength = (session.pairing_strength or "medium").lower()
 
-    r["summary"] = f"Here’s a clean pairing for {spirit} (target: {strength})."
+    r["summary"] = f"Here's a clean pairing for {spirit} (target: {strength})."
 
     # Very simple deterministic rules
     if strength == "mild":
@@ -532,7 +532,7 @@ def _pairing_result(session: SamSession) -> Dict[str, Any]:
             strength="medium",
             pour=spirit,
             quality_tag="balanced",
-            why=["Spice meets sweetness", "Won’t wash out the pour"],
+            why=["Spice meets sweetness", "Won't wash out the pour"],
         )
         alt1 = _pairing(
             cigar="Medium-bodied Nicaraguan corona",
@@ -561,7 +561,7 @@ def _pairing_result(session: SamSession) -> Dict[str, Any]:
         _item("Budget tip", "If you want a cheaper version of the same profile, tell me your price ceiling."),
     ]
 
-    r["next_step"] = "Tell me the exact cigar you have (or your budget) and I’ll tighten this to a specific stick."
+    r["next_step"] = "Tell me the exact cigar you have (or your budget) and I'll tighten this to a specific stick."
     return r
 
 
@@ -580,7 +580,6 @@ def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
         return _hunt_clarify_target(session)
 
     # 2) If waiting for target bottle, treat this message as the target bottle
-    #    This is the key fix you called out.
     if session.hunt_waiting_for_target:
         session.hunt_target_bottle = msg
         session.hunt_waiting_for_target = False
@@ -596,7 +595,7 @@ def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
     # Store area
     session.hunt_area = area or msg
 
-    # If the user provided “best allocation shops” without a bottle, we ask for a target
+    # If the user provided "best allocation shops" without a bottle, we ask for a target
     # but still give a quick plan.
     if "best" in msg.lower() and "allocation" in msg.lower() and not session.hunt_target_bottle:
         session.hunt_waiting_for_target = True
@@ -628,7 +627,7 @@ def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
         _item("Example A", "30344 + Weller"),
         _item("Example B", "Dallas, TX + best allocation shops"),
     ]
-    r["next_step"] = "Reply with ZIP/city and either a bottle name or ‘best allocation shops’."
+    r["next_step"] = "Reply with ZIP/city and either a bottle name or 'best allocation shops'."
     return r
 
 
@@ -636,14 +635,14 @@ def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
     r = _blank_response("hunt")
 
     area = session.hunt_area or "your area"
-    r["summary"] = f"In {area}, what’s the target bottle (or do you want ‘best allocation shops’)?"
+    r["summary"] = f"In {area}, what's the target bottle (or do you want 'best allocation shops')?"
     r["key_points"] = [
-        "Give me 1–3 targets, or say ‘best allocation shops’.",
-        "I’ll tailor the hunt plan around how these bottles typically drop.",
+        "Give me 1–3 targets, or say 'best allocation shops'.",
+        "I'll tailor the hunt plan around how these bottles typically drop.",
     ]
     r["item_list"] = [
         _item("Target example", "Weller Special Reserve"),
-        _item("Target example", "Blanton’s"),
+        _item("Target example", "Blanton's"),
         _item("Option", "best allocation shops"),
     ]
     r["next_step"] = "Reply with your target bottle."
@@ -653,10 +652,10 @@ def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
 def _hunt_quick_plan_then_ask_target(session: SamSession) -> Dict[str, Any]:
     r = _blank_response("hunt")
     area = session.hunt_area or "your area"
-    r["summary"] = f"In {area}, here’s how I’d run the hunt."
+    r["summary"] = f"In {area}, here's how I'd run the hunt."
     r["key_points"] = [
         "Availability changes fast, treat this like reconnaissance.",
-        "Ask the allocation question directly, don’t dance around it.",
+        "Ask the allocation question directly, don't dance around it.",
     ]
     r["next_step"] = "Reply with your target bottle."
     return r
@@ -667,24 +666,22 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     area = session.hunt_area or "your area"
     target = session.hunt_target_bottle or "your target"
 
-    # Very lightweight “plan” response (real store lookup can come later)
+    # Very lightweight "plan" response (real store lookup can come later)
     r["summary"] = f"Alright. Hunt plan for {target} in {area}."
 
     r["key_points"] = [
         "Call 3–5 top shops and ask their allocation process (raffle, list, drops).",
-        "Show up on delivery days, be consistent, don’t ask for favors on visit #1.",
-        "If it’s a lottery bottle, ask how to qualify and what counts (spend, visits, points).",
+        "Show up on delivery days, be consistent, don't ask for favors on visit #1.",
+        "If it's a lottery bottle, ask how to qualify and what counts (spend, visits, points).",
     ]
 
     r["item_list"] = [
         _item("Ask this", "Do you do allocated bottles via raffle, list, or first-come drops?"),
         _item("Ask this", "What day/time do deliveries usually land?"),
-        _item("Ask this", "What’s the fairest way to qualify here?"),
+        _item("Ask this", "What's the fairest way to qualify here?"),
     ]
 
-    # TEMP STUB STOPS (to prove end-to-end wiring for the map/list)
-    # Frontend requires stops[*].lat and stops[*].lng to be numbers.
-       # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
+    # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
     area_hint = (session.context or {}).get("location_hint") or session.hunt_area or area
     resolved_area, stops = _build_hunt_stops(area_hint)
 
@@ -746,3 +743,6 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
                 lng=center_lng - 0.015,
             ),
         ]
+
+    r["next_step"] = "Call these shops and ask about their allocation process."
+    return r
