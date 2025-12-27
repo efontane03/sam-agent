@@ -303,6 +303,13 @@ class SamSession:
     pairing_strength: Optional[str] = None
     pairing_waiting_for_spirit: bool = False
     pairing_waiting_for_strength: bool = False
+    
+    def __post_init__(self):
+        # Ensure context is always a dict
+        if self.context is None:
+            self.context = {}
+        elif not isinstance(self.context, dict):
+            self.context = {}
 
 
 # ==============================
@@ -446,8 +453,9 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
 
     # Light personalization using stash if present
     stash = None
-    if isinstance(session.context, dict):
-        stash = session.context.get("home_stash")
+    context = session.context if hasattr(session, 'context') and session.context else {}
+    if isinstance(context, dict):
+        stash = context.get("home_stash")
     if isinstance(stash, dict) and stash.get("items"):
         r["item_list"].append(_item("Home Stash detected", "I can prioritize what you already own."))
 
