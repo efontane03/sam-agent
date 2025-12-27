@@ -197,18 +197,10 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
     if not hint:
         hint = "Atlanta, GA"
 
-    geo = _nominatim_geocode(hint)
-    if not geo:
-        # fallback to Atlanta center
-        lat, lng, label = 33.7490, -84.3880, hint
-        return label, []
-
-    lat, lng, label = geo
-    stops = _overpass_liquor_stores(lat, lng, radius_m=8000, limit=8)
-    
-    # If Overpass found nothing, use curated real stores for Atlanta area
-    if not stops and "30344" in hint:
-        stops = [
+    # Check for Atlanta/30344 area first - use curated real stores
+    hint_lower = hint.lower()
+    if "30344" in hint or "30318" in hint or "30309" in hint or "30324" in hint or "30305" in hint or "atlanta" in hint_lower:
+        return "Atlanta, GA", [
             _stop(
                 name="Green's Beverages",
                 address="2625 Piedmont Rd NE, Atlanta, GA 30324",
@@ -245,6 +237,16 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
                 lng=-84.3361,
             ),
         ]
+
+    # Try geocoding and Overpass for other areas
+    geo = _nominatim_geocode(hint)
+    if not geo:
+        # fallback to Atlanta center
+        lat, lng, label = 33.7490, -84.3880, hint
+        return label, []
+
+    lat, lng, label = geo
+    stops = _overpass_liquor_stores(lat, lng, radius_m=8000, limit=8)
     
     return label, stops
 
