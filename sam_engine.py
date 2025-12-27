@@ -389,7 +389,7 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         # Merge optional context the UI might send
         # (FastAPI main.py already does session.context.update(payload.context))
         # but we tolerate additional nesting.
-        if isinstance(session.context, dict):
+        if session.context and isinstance(session.context, dict):
             # Some UIs pass {"location_hint": "30344"}
             loc_hint = session.context.get("location_hint")
             if isinstance(loc_hint, str) and loc_hint.strip():
@@ -407,14 +407,20 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
             resp = _handle_info(msg, session)
 
         # Persist last_mode
-        session.last_mode = resp.get("mode", mode)  # type: ignore
+        actual_mode = resp.get("mode") if isinstance(resp, dict) else mode
+        session.last_mode = actual_mode  # type: ignore
 
         # Ensure schema completeness + JSON-serializable
-        base = _blank_response(resp.get("mode", mode))
-        base.update(resp)
+        base = _blank_response(actual_mode)
+        if isinstance(resp, dict):
+            base.update(resp)
         return _coerce_jsonable(base)
 
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"sam_engine error: {error_trace}")
+        
         base = _blank_response("info")
         base["summary"] = f"Engine error: {type(e).__name__}: {e}"
         base["next_step"] = "Retry your message. If it repeats, check Railway logs for the stack trace."
@@ -727,7 +733,8 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     ]
 
     # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
-    area_hint = (session.context or {}).get("location_hint") or session.hunt_area or area
+    context = session.context if session.context and isinstance(session.context, dict) else {}
+    area_hint = context.get("location_hint") or session.hunt_area or area
     resolved_area, stops = _build_hunt_stops(area_hint)
 
     # Update area label if we got a clearer geocode label back
@@ -790,4 +797,4 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
         ]
 
     r["next_step"] = "Call these shops and ask about their allocation process."
-    return 
+    return r
