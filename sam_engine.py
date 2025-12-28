@@ -20,6 +20,7 @@ import json
 import urllib.request
 import urllib.parse
 import urllib.error
+import os
 
 # ==============================
 # Locked schema helpers
@@ -71,7 +72,8 @@ def _stop(
 # Lightweight map sourcing (OSM)
 # ==============================
 
-_OSM_UA = "SamBourbonCaddie/1.0 (contact: local-dev)"  # keep a UA for OSM services
+_OSM_UA = "SamBourbonCaddie/1.0 (contact: local-dev)"
+_GOOGLE_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
 
 def _http_get_json(url: str, timeout: int = 8) -> Any:
@@ -106,6 +108,76 @@ def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
         return lat, lng, name
     except Exception:
         return None
+
+
+def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
+    """Use Google Places API to find liquor stores near a location."""
+    if not _GOOGLE_API_KEY:
+        print("WARNING: No Google Places API key found")
+        return []
+    
+    out = []
+    try:
+        # Google Places API: Nearby Search
+        params = {
+            "location": f"{lat},{lng}",
+            "radius": str(radius_m),
+            "type": "liquor_store",
+            "key": _GOOGLE_API_KEY
+        }
+        url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json?" + urllib.parse.urlencode(params)
+        
+        data = _http_get_json(url, timeout=10)
+        
+        if data.get("status") != "OK":
+            print(f"Google Places API error: {data.get('status')}")
+            return []
+        
+        results = data.get("results", [])[:limit]
+        
+        for place in results:
+            name = place.get("name", "Liquor Store")
+            place_lat = place.get("geometry", {}).get("location", {}).get("lat")
+            place_lng = place.get("geometry", {}).get("location", {}).get("lng")
+            address = place.get("vicinity", "")
+            
+            # Get phone number if available (requires Place Details API call)
+            place_id = place.get("place_id")
+            phone = None
+            if place_id:
+                try:
+                    details_params = {
+                        "place_id": place_id,
+                        "fields": "formatted_phone_number",
+                        "key": _GOOGLE_API_KEY
+                    }
+                    details_url = "https://maps.googleapis.com/maps/api/place/details/json?" + urllib.parse.urlencode(details_params)
+                    details_data = _http_get_json(details_url, timeout=5)
+                    if details_data.get("status") == "OK":
+                        phone = details_data.get("result", {}).get("formatted_phone_number")
+                except Exception:
+                    pass
+            
+            notes = f"Call and ask about allocation process (raffle, list, drops)."
+            if phone:
+                notes = f"Call {phone}. Ask about allocation process (raffle, list, drops)."
+            
+            if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
+                out.append(_stop(
+                    name=name,
+                    address=address,
+                    notes=notes,
+                    lat=float(place_lat),
+                    lng=float(place_lng)
+                ))
+            
+            if len(out) >= limit:
+                break
+                
+    except Exception as e:
+        print(f"Google Places API error: {type(e).__name__}: {e}")
+    
+    return out
 
 
 def _overpass_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
@@ -196,10 +268,13 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
     hint = str(area_hint or "").strip()
     if not hint:
         hint = "Atlanta, GA"
+    
+    print(f"DEBUG: _build_hunt_stops called with area_hint='{area_hint}', hint='{hint}'")
 
     # Check for Atlanta/30344 area first - use curated real stores
     hint_lower = hint.lower()
     if "30344" in hint or "30318" in hint or "30309" in hint or "30324" in hint or "30305" in hint or "atlanta" in hint_lower:
+        print(f"DEBUG: Matched Atlanta area, returning real stores")
         return "Atlanta, GA", [
             _stop(
                 name="Green's Beverages",
@@ -238,7 +313,7 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
             ),
         ]
 
-    # Try geocoding and Overpass for other areas
+    # Try geocoding and Google Places for other areas
     geo = _nominatim_geocode(hint)
     if not geo:
         # fallback to Atlanta center
@@ -246,6 +321,15 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
         return label, []
 
     lat, lng, label = geo
+    
+    # Try Google Places first (more reliable)
+    if _GOOGLE_API_KEY:
+        stops = _google_places_liquor_stores(lat, lng, radius_m=8000, limit=8)
+        if stops:
+            print(f"DEBUG: Found {len(stops)} stores via Google Places")
+            return label, stops
+    
+    # Fallback to Overpass if Google Places fails or no API key
     stops = _overpass_liquor_stores(lat, lng, radius_m=8000, limit=8)
     
     return label, stops
