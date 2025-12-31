@@ -828,7 +828,9 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
 
     # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
     context = session.context if session.context and isinstance(session.context, dict) else {}
-    area_hint = context.get("location_hint") or session.hunt_area or area
+    
+    # Use hunt_area (which contains the cleaned location) instead of context location_hint
+    area_hint = session.hunt_area or context.get("location_hint") or area
     resolved_area, stops = _build_hunt_stops(area_hint)
 
     # Update area label if we got a clearer geocode label back
