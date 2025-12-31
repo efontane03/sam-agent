@@ -715,6 +715,32 @@ def _pairing_result(session: SamSession) -> Dict[str, Any]:
 # ------------------------------
 
 
+def _extract_location_from_message(msg: str) -> Optional[str]:
+    """Extract location (ZIP, city/state) from a message like 'find stores in Dallas, TX'."""
+    # Try ZIP first
+    zip_code = _extract_zip(msg)
+    if zip_code:
+        return zip_code
+    
+    # Look for common patterns: "in [location]", "near [location]", "[location] stores"
+    patterns = [
+        r'in\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
+        r'near\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
+        r'^\s*([a-z\s,]+?)\s+(?:stores|shops|allocations|bourbon)',
+    ]
+    
+    msg_lower = msg.lower()
+    for pattern in patterns:
+        match = re.search(pattern, msg_lower)
+        if match:
+            location = match.group(1).strip()
+            # Filter out common non-location words
+            if location and location not in ['find', 'show', 'me', 'get', 'bourbon', 'stores', 'shops', 'allocations']:
+                return location
+    
+    return None
+
+
 def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
     # 1) If waiting for area, treat this as the area
     if session.hunt_waiting_for_area:
@@ -730,14 +756,14 @@ def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
         session.hunt_waiting_for_target = False
         return _hunt_plan(session)
 
-    # Fresh hunt request
-    area = _extract_zip(msg) or session.hunt_area
+    # Fresh hunt request - extract location from message
+    area = _extract_location_from_message(msg) or session.hunt_area
 
     if not area and not _looks_like_location(msg):
         session.hunt_waiting_for_area = True
         return _hunt_clarify_area(session)
 
-    # Store area
+    # Store cleaned area
     session.hunt_area = area or msg
 
     # If the user provided "best allocation shops" without a bottle, we ask for a target
