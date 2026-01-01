@@ -116,6 +116,15 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
         print("WARNING: No Google Places API key found")
         return []
     
+    # Chain stores that typically don't carry allocated bourbon
+    EXCLUDED_CHAINS = [
+        'cvs', 'walgreens', 'rite aid', 'target', 'walmart', 'costco',
+        '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
+        'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
+        'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b', 
+        'food lion', 'giant', 'stop & shop', 'stop and shop'
+    ]
+    
     out = []
     try:
         # Google Places API: Nearby Search
@@ -133,10 +142,31 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             print(f"Google Places API error: {data.get('status')}")
             return []
         
-        results = data.get("results", [])[:limit]
+        results = data.get("results", [])
         
         for place in results:
             name = place.get("name", "Liquor Store")
+            name_lower = name.lower().strip()
+            
+            # Skip if it's a chain store that doesn't carry allocated bourbon
+            is_excluded = False
+            for chain in EXCLUDED_CHAINS:
+                if chain in name_lower:
+                    print(f"DEBUG: Skipping chain store: {name}")
+                    is_excluded = True
+                    break
+            
+            if is_excluded:
+                continue
+            
+            # Skip gas stations (they usually don't have allocated bourbon)
+            place_types = place.get("types", [])
+            if "gas_station" in place_types or "convenience_store" in place_types:
+                # Unless it has "liquor" or "wine" in the name
+                if not any(keyword in name_lower for keyword in ['liquor', 'wine', 'spirits', 'beverage']):
+                    print(f"DEBUG: Skipping convenience store: {name}")
+                    continue
+            
             place_lat = place.get("geometry", {}).get("location", {}).get("lat")
             place_lng = place.get("geometry", {}).get("location", {}).get("lng")
             address = place.get("vicinity", "")
@@ -421,6 +451,32 @@ def _looks_like_location(text: str) -> bool:
     if "near me" in t or "closest" in t or "in my area" in t:
         return True
     return False
+
+
+def _extract_location_from_message(msg: str) -> Optional[str]:
+    """Extract location (ZIP, city/state) from a message like 'find stores in Dallas, TX'."""
+    # Try ZIP first
+    zip_code = _extract_zip(msg)
+    if zip_code:
+        return zip_code
+    
+    # Look for common patterns: "in [location]", "near [location]", "[location] stores"
+    patterns = [
+        r'in\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
+        r'near\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
+        r'^\s*([a-z\s,]+?)\s+(?:stores|shops|allocations|bourbon)',
+    ]
+    
+    msg_lower = msg.lower()
+    for pattern in patterns:
+        match = re.search(pattern, msg_lower)
+        if match:
+            location = match.group(1).strip()
+            # Filter out common non-location words
+            if location and location not in ['find', 'show', 'me', 'get', 'bourbon', 'stores', 'shops', 'allocations']:
+                return location
+    
+    return None
 
 
 def _infer_mode(text: str, session: SamSession) -> SamMode:
@@ -715,32 +771,6 @@ def _pairing_result(session: SamSession) -> Dict[str, Any]:
 # ------------------------------
 
 
-def _extract_location_from_message(msg: str) -> Optional[str]:
-    """Extract location (ZIP, city/state) from a message like 'find stores in Dallas, TX'."""
-    # Try ZIP first
-    zip_code = _extract_zip(msg)
-    if zip_code:
-        return zip_code
-    
-    # Look for common patterns: "in [location]", "near [location]", "[location] stores"
-    patterns = [
-        r'in\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
-        r'near\s+([a-z\s,]+?)(?:\s+for|\s+to|\s+\d|$)',
-        r'^\s*([a-z\s,]+?)\s+(?:stores|shops|allocations|bourbon)',
-    ]
-    
-    msg_lower = msg.lower()
-    for pattern in patterns:
-        match = re.search(pattern, msg_lower)
-        if match:
-            location = match.group(1).strip()
-            # Filter out common non-location words
-            if location and location not in ['find', 'show', 'me', 'get', 'bourbon', 'stores', 'shops', 'allocations']:
-                return location
-    
-    return None
-
-
 def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
     # 1) If waiting for area, treat this as the area
     if session.hunt_waiting_for_area:
@@ -780,143 +810,3 @@ def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
     # If we have area but no bottle, ask for bottle
     if not session.hunt_target_bottle:
         session.hunt_waiting_for_target = True
-        return _hunt_clarify_target(session)
-
-    # Otherwise, run hunt plan
-    return _hunt_plan(session)
-
-
-def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-
-    r["summary"] = "I can do this, I just need your hunt area and target."
-    r["key_points"] = [
-        "Send your ZIP or city/state.",
-        "Tell me if you want a specific bottle or just the best allocation shops.",
-    ]
-    r["item_list"] = [
-        _item("Example A", "30344 + Weller"),
-        _item("Example B", "Dallas, TX + best allocation shops"),
-    ]
-    r["next_step"] = "Reply with ZIP/city and either a bottle name or 'best allocation shops'."
-    return r
-
-
-def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-
-    area = session.hunt_area or "your area"
-    r["summary"] = f"In {area}, what's the target bottle (or do you want 'best allocation shops')?"
-    r["key_points"] = [
-        "Give me 1–3 targets, or say 'best allocation shops'.",
-        "I'll tailor the hunt plan around how these bottles typically drop.",
-    ]
-    r["item_list"] = [
-        _item("Target example", "Weller Special Reserve"),
-        _item("Target example", "Blanton's"),
-        _item("Option", "best allocation shops"),
-    ]
-    r["next_step"] = "Reply with your target bottle."
-    return r
-
-
-def _hunt_quick_plan_then_ask_target(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-    area = session.hunt_area or "your area"
-    r["summary"] = f"In {area}, here's how I'd run the hunt."
-    r["key_points"] = [
-        "Availability changes fast, treat this like reconnaissance.",
-        "Ask the allocation question directly, don't dance around it.",
-    ]
-    r["next_step"] = "Reply with your target bottle."
-    return r
-
-
-def _hunt_plan(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-    area = session.hunt_area or "your area"
-    target = session.hunt_target_bottle or "your target"
-
-    # Very lightweight "plan" response (real store lookup can come later)
-    r["summary"] = f"Alright. Hunt plan for {target} in {area}."
-
-    r["key_points"] = [
-        "Call 3–5 top shops and ask their allocation process (raffle, list, drops).",
-        "Show up on delivery days, be consistent, don't ask for favors on visit #1.",
-        "If it's a lottery bottle, ask how to qualify and what counts (spend, visits, points).",
-    ]
-
-    r["item_list"] = [
-        _item("Ask this", "Do you do allocated bottles via raffle, list, or first-come drops?"),
-        _item("Ask this", "What day/time do deliveries usually land?"),
-        _item("Ask this", "What's the fairest way to qualify here?"),
-    ]
-
-    # Real store lookup (OSM). Prefer location_hint → hunt_area → area label.
-    context = session.context if session.context and isinstance(session.context, dict) else {}
-    
-    # Use hunt_area (which contains the cleaned location) instead of context location_hint
-    area_hint = session.hunt_area or context.get("location_hint") or area
-    resolved_area, stops = _build_hunt_stops(area_hint)
-
-    # Update area label if we got a clearer geocode label back
-    if resolved_area:
-        area = resolved_area
-
-    # If Overpass returns results, use them
-    if stops:
-        r["stops"] = stops
-    else:
-        # Fallback to simple stub stops (NO "Stop X —" prefix in the name)
-        loc_hint = str(area_hint or "").strip()
-        center_lat, center_lng = 33.7490, -84.3880
-        zip_centers = {
-            "30344": (33.6796, -84.4394),
-            "30318": (33.7925, -84.4519),
-            "30309": (33.7984, -84.3896),
-            "30324": (33.8233, -84.3530),
-            "30305": (33.8324, -84.3857),
-        }
-        if loc_hint.isdigit() and len(loc_hint) == 5 and loc_hint in zip_centers:
-            center_lat, center_lng = zip_centers[loc_hint]
-
-        r["stops"] = [
-            _stop(
-                name="Allocation-Friendly Shop (Fallback)",
-                address=f"Near {loc_hint or area}",
-                notes="Fallback pin to validate mapping. Real lookup may be rate-limited temporarily.",
-                lat=center_lat + 0.010,
-                lng=center_lng - 0.010,
-            ),
-            _stop(
-                name="Bottle Drop Spot (Fallback)",
-                address=f"Near {loc_hint or area}",
-                notes="Ask about delivery mornings and raffles.",
-                lat=center_lat + 0.006,
-                lng=center_lng + 0.012,
-            ),
-            _stop(
-                name="Rewards Program Store (Fallback)",
-                address=f"Near {loc_hint or area}",
-                notes="Ask how to qualify, points, spend, visit count.",
-                lat=center_lat - 0.008,
-                lng=center_lng + 0.008,
-            ),
-            _stop(
-                name="High-Turnover Liquor Store (Fallback)",
-                address=f"Near {loc_hint or area}",
-                notes="Check early on delivery days.",
-                lat=center_lat - 0.012,
-                lng=center_lng - 0.006,
-            ),
-            _stop(
-                name="Specialty Bourbon Shop (Fallback)",
-                address=f"Near {loc_hint or area}",
-                notes="Relationship shop, ask their allocation rules.",
-                lat=center_lat + 0.002,
-                lng=center_lng - 0.015,
-            ),
-        ]
-
-    r["next_step"] = "Call these shops and ask about their allocation process."
-    return r
