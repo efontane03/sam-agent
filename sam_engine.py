@@ -1,6 +1,6 @@
-"""sam_engine.py - Complete Fixed Version
+"""sam_engine.py - Integrated Version with Curated Database + Google Places
 
-Drop-in engine for Sam Agent with proper chain store filtering.
+Combines curated allocation store database with live Google Places search.
 """
 
 from __future__ import annotations
@@ -12,6 +12,9 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import os
+
+# Import curated database
+from allocation_stores import ALLOCATION_STORES, CITY_ALIASES, get_allocation_stores_for_city
 
 SamMode = Literal["info", "pairing", "hunt", "clarify"]
 
@@ -57,6 +60,7 @@ def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
         return None
 
 def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
+    """Search for liquor stores using Google Places API with chain filtering."""
     if not _GOOGLE_API_KEY:
         print("WARNING: No Google Places API key")
         return []
@@ -128,36 +132,110 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
     
     return out
 
+def _convert_curated_to_stops(curated_stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert curated store format to stops format."""
+    stops = []
+    for store in curated_stores:
+        # Build detailed notes with allocation type and tips
+        allocation_type = store.get("allocation_type", "unknown")
+        base_notes = store.get("notes", "")
+        
+        notes_parts = []
+        if allocation_type == "raffle":
+            notes_parts.append("🎟️ RAFFLE system.")
+        elif allocation_type == "lottery":
+            notes_parts.append("🎰 LOTTERY system.")
+        elif allocation_type == "list":
+            notes_parts.append("📋 ALLOCATION LIST.")
+        elif allocation_type == "points":
+            notes_parts.append("⭐ POINTS system.")
+        elif allocation_type == "first_come":
+            notes_parts.append("🏃 FIRST-COME drops.")
+        elif allocation_type == "spend_based":
+            notes_parts.append("💰 SPEND-BASED allocation.")
+        
+        notes_parts.append(base_notes)
+        
+        phone = store.get("phone")
+        if phone:
+            notes_parts.insert(0, f"Call {phone}.")
+        
+        social = store.get("social_media")
+        if social:
+            notes_parts.append(social)
+        
+        notes = " ".join(notes_parts)
+        
+        stop = _stop(
+            name=store["name"],
+            address=store.get("address", ""),
+            notes=notes,
+            lat=store.get("lat"),
+            lng=store.get("lng")
+        )
+        stops.append(stop)
+    
+    return stops
+
 def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Build hunt stops by:
+    1. First checking curated database
+    2. Falling back to Google Places if no curated data
+    3. Merging both if available
+    """
     hint = str(area_hint or "").strip()
     if not hint:
         hint = "Atlanta, GA"
     
-    print(f"DEBUG: area_hint='{area_hint}'")
+    print(f"DEBUG: Building stops for area_hint='{area_hint}'")
     
-    hint_lower = hint.lower()
-    if any(z in hint for z in ["30344", "30318", "30309", "30324", "30305"]) or "atlanta" in hint_lower:
-        print("DEBUG: Atlanta stores")
-        return "Atlanta, GA", [
-            _stop("Green's Beverages", "2625 Piedmont Rd NE, Atlanta, GA 30324", "Call (404) 233-3845", 33.8233, -84.3530),
-            _stop("Tower Beer Wine & Spirits", "2161 Piedmont Rd NE, Atlanta, GA 30324", "Call (404) 233-5432", 33.8104, -84.3567),
-            _stop("Hop City Beer & Wine", "1000 Marietta St NW, Atlanta, GA 30318", "Call (404) 968-2537", 33.7842, -84.4138),
-            _stop("Green's Package Store", "2215 N Druid Hills Rd NE, Atlanta, GA 30329", "Call (404) 633-7573", 33.8157, -84.3282),
-            _stop("Mac's Beer & Wine", "1660 McLendon Ave NE, Atlanta, GA 30307", "Call (404) 377-4400", 33.7646, -84.3361),
-        ]
+    # Step 1: Check curated database
+    curated_stores = get_allocation_stores_for_city(hint)
+    curated_stops = []
     
+    if curated_stores:
+        print(f"DEBUG: Found {len(curated_stores)} curated stores for {hint}")
+        curated_stops = _convert_curated_to_stops(curated_stores)
+    
+    # Step 2: Get geocode for Google Places search
     geo = _nominatim_geocode(hint)
-    if not geo:
-        return hint, []
+    google_stops = []
+    resolved_area = hint
     
-    lat, lng, label = geo
-    if _GOOGLE_API_KEY:
-        stops = _google_places_liquor_stores(lat, lng, radius_m=8000, limit=8)
-        if stops:
-            print(f"DEBUG: Found {len(stops)} via Google")
-            return label, stops
+    if geo:
+        lat, lng, resolved_area = geo
+        print(f"DEBUG: Geocoded '{hint}' to {lat}, {lng}")
+        
+        if _GOOGLE_API_KEY:
+            # Search with Google Places
+            google_stops = _google_places_liquor_stores(lat, lng, radius_m=8000, limit=8)
+            if google_stops:
+                print(f"DEBUG: Found {len(google_stops)} stores via Google Places")
     
-    return label, []
+    # Step 3: Merge results
+    # Priority: curated stores first (they're verified), then Google Places
+    all_stops = curated_stops + google_stops
+    
+    # Deduplicate by name (case-insensitive)
+    seen_names = set()
+    unique_stops = []
+    for stop in all_stops:
+        name_key = stop["name"].lower().strip()
+        if name_key not in seen_names:
+            seen_names.add(name_key)
+            unique_stops.append(stop)
+    
+    # Limit to top 10
+    final_stops = unique_stops[:10]
+    
+    if final_stops:
+        print(f"DEBUG: Returning {len(final_stops)} total stops ({len(curated_stops)} curated + {len(google_stops)} Google)")
+        return resolved_area, final_stops
+    
+    # Fallback if nothing found
+    print("DEBUG: No stores found, returning fallback")
+    return hint, []
 
 def _coerce_jsonable(obj: Any) -> Any:
     if obj is None:
@@ -313,23 +391,47 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     area = session.hunt_area or "your area"
     target = session.hunt_target_bottle or "your target"
     
-    r["summary"] = f"Hunt plan for {target} in {area}."
-    r["key_points"] = ["Call 3-5 shops, ask allocation process", "Show up delivery days", "Ask how to qualify"]
-    
     area_hint = session.hunt_area or area
     resolved_area, stops = _build_hunt_stops(area_hint)
     
     if resolved_area:
         area = resolved_area
     
+    # Check if we have curated stores
+    has_curated = any(
+        "🎟️" in stop.get("notes", "") or
+        "🎰" in stop.get("notes", "") or
+        "📋" in stop.get("notes", "") or
+        "⭐" in stop.get("notes", "") or
+        "🏃" in stop.get("notes", "") or
+        "💰" in stop.get("notes", "")
+        for stop in stops
+    )
+    
+    if has_curated:
+        r["summary"] = f"Hunt plan for {target} in {area}. Showing verified allocation stores + additional options."
+        r["key_points"] = [
+            "⭐ Stores with icons (🎟️🎰📋⭐🏃💰) have VERIFIED allocation systems",
+            "Call ahead to confirm current allocation process",
+            "Ask about delivery days, raffle timing, or list signup"
+        ]
+    else:
+        r["summary"] = f"Hunt plan for {target} in {area}."
+        r["key_points"] = [
+            "Call 3-5 shops, ask allocation process",
+            "Show up delivery days (usually Thu/Fri)",
+            "Ask how to qualify for allocated bottles"
+        ]
+    
     if stops:
         r["stops"] = stops
     else:
+        # Fallback
         loc_hint = str(area_hint or "").strip()
         center_lat, center_lng = 33.7490, -84.3880
         r["stops"] = [
-            _stop("Fallback Store", f"Near {loc_hint}", "Call and ask about allocations.", center_lat, center_lng),
+            _stop("Local Liquor Store", f"Near {loc_hint}", "Call and ask about allocations.", center_lat, center_lng),
         ]
     
-    r["next_step"] = "Call these shops."
+    r["next_step"] = "Call these shops and ask about their allocation process."
     return r
