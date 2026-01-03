@@ -70,7 +70,9 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
         '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
         'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
         'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b',
-        'food lion', 'giant', 'stop & shop', 'stop and shop'
+        'food lion', 'giant', 'stop & shop', 'stop and shop',
+        'food store', 'grocery', 'market', 'deli', 'meat market',
+        'gas station', 'convenience', 'mini mart', 'smoke shop'
     ]
     
     out = []
@@ -97,9 +99,18 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
                 continue
             
             place_types = place.get("types", [])
+            
+            # Skip gas stations and convenience stores unless they're clearly liquor-focused
             if "gas_station" in place_types or "convenience_store" in place_types:
                 if not any(kw in name_lower for kw in ['liquor', 'wine', 'spirits', 'beverage']):
                     print(f"DEBUG: Skipping convenience: {name}")
+                    continue
+            
+            # Skip grocery stores, delis, and food-focused places
+            if any(t in place_types for t in ["grocery_or_supermarket", "supermarket", "store"]):
+                # Only keep if they have "liquor_store" type AND liquor-related keywords in name
+                if "liquor_store" not in place_types or not any(kw in name_lower for kw in ['liquor', 'wine', 'spirits', 'beverage', 'beer']):
+                    print(f"DEBUG: Skipping grocery/food store: {name}")
                     continue
             
             place_lat = place.get("geometry", {}).get("location", {}).get("lat")
