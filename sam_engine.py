@@ -89,6 +89,7 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             name = place.get("name", "Liquor Store")
             name_lower = name.lower().strip()
             
+            # Check excluded chains
             is_excluded = False
             for chain in EXCLUDED_CHAINS:
                 if chain in name_lower:
@@ -97,6 +98,14 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
                     break
             if is_excluded:
                 continue
+            
+            # Additional name-based filtering for food stores, delis, markets
+            food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
+            if any(keyword in name_lower for keyword in food_keywords):
+                # Only keep if name ALSO has strong liquor indicators
+                if not any(liquor_kw in name_lower for liquor_kw in ['liquor', 'wine & spirits', 'wine and spirits', 'beverage depot']):
+                    print(f"DEBUG: Skipping food-focused store: {name}")
+                    continue
             
             place_types = place.get("types", [])
             
