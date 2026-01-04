@@ -23,6 +23,32 @@ from cigar_pairings import (
 )
 from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 
+def _provide_bourbon_research_guidance(bourbon_name: str) -> Dict[str, Any]:
+    """Provide guidance on researching a bourbon not in our database."""
+    return {
+        "name": bourbon_name.title(),
+        "summary": f"I don't have {bourbon_name.title()} in my database yet, but I can guide you on what to look for!",
+        "research_tips": [
+            f"Search '{bourbon_name} bourbon review' for detailed tasting notes",
+            f"Check '{bourbon_name} distillery' to learn who makes it",
+            f"Look for '{bourbon_name} MSRP' to find retail pricing",
+            f"Try '{bourbon_name} proof ABV' for strength information"
+        ],
+        "trusted_sources": [
+            "BreakingBourbon.com - Professional reviews",
+            "BourbonCulture.com - Community ratings",
+            "Reddit r/bourbon - Real user experiences",
+            "Distiller.com - Comprehensive database"
+        ],
+        "what_to_look_for": [
+            "Distillery and location",
+            "Proof/ABV and age statement",
+            "Mashbill (corn, rye, wheat percentages)",
+            "Tasting notes and finish",
+            "Price range and availability"
+        ]
+    }
+
 SamMode = Literal["info", "pairing", "hunt", "clarify"]
 
 def _blank_response(mode: SamMode = "info") -> Dict[str, Any]:
@@ -379,35 +405,59 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         return _coerce_jsonable(base)
 
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
-    """Handle bourbon information requests and general info."""
+    """Handle bourbon information requests - provides info or research guidance."""
     msg_lower = msg.lower()
     
     # Check if user is asking about a specific bourbon
-    bourbon_info = None
-    for bourbon_name in BOURBON_KNOWLEDGE.keys():
-        if bourbon_name in msg_lower:
-            bourbon_info = get_bourbon_info(bourbon_name)
-            break
+    info_keywords = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
+    is_bourbon_query = any(keyword in msg_lower for keyword in info_keywords)
     
     r = _blank_response("info")
     
-    if bourbon_info:
-        # User asked about a specific bourbon - provide detailed info
-        r["summary"] = f"{bourbon_info['name']} - {bourbon_info['distillery']}"
+    if is_bourbon_query:
+        # Extract the bourbon name from the query
+        bourbon_name = msg_lower
+        for keyword in info_keywords:
+            bourbon_name = bourbon_name.replace(keyword, "").strip()
+        bourbon_name = bourbon_name.strip()
         
-        r["item_list"] = [
-            _item("Distillery", bourbon_info["distillery"]),
-            _item("Proof", str(bourbon_info["proof"])),
-            _item("Age", bourbon_info["age"]),
-            _item("Price Range", bourbon_info["price_range"]),
-            _item("Availability", bourbon_info["availability"]),
-            _item("Mashbill", bourbon_info["mashbill"])
-        ]
+        # First check hardcoded database for instant results
+        bourbon_info = get_bourbon_info(bourbon_name)
         
-        r["key_points"] = bourbon_info["tasting_notes"]
-        
-        # Add why it's great and fun fact as next step
-        r["next_step"] = f"{bourbon_info['why_its_great']} Fun fact: {bourbon_info['fun_fact']}"
+        if bourbon_info:
+            # Found in database - provide detailed info instantly
+            r["summary"] = f"{bourbon_info['name']} - {bourbon_info['distillery']}"
+            
+            r["item_list"] = [
+                _item("Distillery", bourbon_info["distillery"]),
+                _item("Proof", str(bourbon_info["proof"])),
+                _item("Age", bourbon_info["age"]),
+                _item("Price Range", bourbon_info["price_range"]),
+                _item("Availability", bourbon_info["availability"]),
+                _item("Mashbill", bourbon_info["mashbill"])
+            ]
+            
+            r["key_points"] = bourbon_info["tasting_notes"]
+            r["next_step"] = f"{bourbon_info['why_its_great']} Fun fact: {bourbon_info['fun_fact']}"
+            
+        else:
+            # Not in database - provide research guidance
+            research = _provide_bourbon_research_guidance(bourbon_name)
+            
+            r["summary"] = research["summary"]
+            
+            r["item_list"] = [
+                _item("What to look for", ", ".join(research["what_to_look_for"][:3]))
+            ]
+            
+            r["key_points"] = [
+                "Here's how to research this bourbon:",
+                f"• Search: '{bourbon_name} bourbon review'",
+                f"• Check trusted sources: {research['trusted_sources'][0]}",
+                "• Look for distillery, proof, age, and tasting notes"
+            ]
+            
+            r["next_step"] = f"I'll add {bourbon_name.title()} to my database soon! For now, check BreakingBourbon.com or r/bourbon for reviews."
         
     else:
         # General info mode
