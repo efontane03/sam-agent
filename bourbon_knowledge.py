@@ -249,6 +249,63 @@ BOURBON_KNOWLEDGE = {
         ],
         "why_its_great": "High-proof powerhouse with incredible depth. Part of the excellent Whiskey Row series.",
         "fun_fact": "Old Forester is the only bourbon continuously distilled before, during, and after Prohibition."
+    },
+    
+    "penelope": {
+        "name": "Penelope Bourbon",
+        "distillery": "MGP Distillery",
+        "location": "Indiana (bottled in Kentucky)",
+        "proof": "Varies (80-120)",
+        "age": "No age statement",
+        "price_range": "$40-80",
+        "availability": "Semi-allocated",
+        "mashbill": "Four-grain blend (corn, wheat, rye, malted barley)",
+        "tasting_notes": [
+            "Rich caramel and vanilla with honey sweetness",
+            "Fullbodied palate with dark chocolate and toasted oak",
+            "Spicy rye and black pepper balanced by wheat's smoothness",
+            "Long, warm finish with lingering baking spices"
+        ],
+        "why_its_great": "Penelope's innovative four-grain blending approach creates exceptional complexity and balance at barrel strength.",
+        "fun_fact": "Named after founder Mike Paladini's daughter, Penelope uses a proprietary 'flavor spiraling' blending process."
+    },
+    
+    "michter's": {
+        "name": "Michter's US*1 Bourbon",
+        "distillery": "Michter's Distillery",
+        "location": "Louisville, Kentucky",
+        "proof": 91.4,
+        "age": "No age statement",
+        "price_range": "$45-55",
+        "availability": "Semi-allocated",
+        "mashbill": "Proprietary (higher than traditional rye content)",
+        "tasting_notes": [
+            "Butterscotch, vanilla cream, and caramel",
+            "Rich toffee with hints of dried fruit and spice",
+            "Smooth mouthfeel with notes of toasted oak",
+            "Long, warming finish with subtle sweetness"
+        ],
+        "why_its_great": "Michter's uses toasted barrels (not charred) giving unique flavor depth that sets it apart from standard bourbons.",
+        "fun_fact": "Michter's claims to be America's first whiskey company, with roots dating back to 1753."
+    },
+    
+    "widow jane": {
+        "name": "Widow Jane 10 Year",
+        "distillery": "Widow Jane Distillery",
+        "location": "Brooklyn, New York (sourced whiskey aged in Kentucky)",
+        "proof": 91,
+        "age": "10 years",
+        "price_range": "$70-85",
+        "availability": "Widely available",
+        "mashbill": "Corn, rye, malted barley",
+        "tasting_notes": [
+            "Caramel, vanilla, and maple syrup on the nose",
+            "Rich butterscotch with cherry and orange notes",
+            "Creamy texture with baking spices and toasted oak",
+            "Long, complex finish with hints of dried fruit"
+        ],
+        "why_its_great": "Cut with limestone-rich water from the Rosendale Mines, giving it exceptional minerality and smoothness.",
+        "fun_fact": "Named after the Widow Jane Mine in Rosendale, NY, which provided limestone for the Brooklyn Bridge."
     }
 }
 

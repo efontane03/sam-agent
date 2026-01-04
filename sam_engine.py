@@ -643,27 +643,36 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     # Normalize common variations
     msg_normalized = msg_lower.replace("4 roses", "four roses").replace("wt", "wild turkey")
     
-    # Check ALL bourbons in our databases instead of hardcoded keywords
+    # TIER 1: Check session memory first (if user just discussed a bourbon)
     found_bourbon = None
+    if session.last_bourbon_discussed:
+        bourbon_lower = session.last_bourbon_discussed.lower()
+        if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
+            found_bourbon = session.last_bourbon_discussed.lower()
+            print(f"Found bourbon from session memory: {found_bourbon}")
     
-    # Check bourbon knowledge database
-    for bourbon_name in BOURBON_KNOWLEDGE.keys():
-        if bourbon_name in msg_normalized:
-            found_bourbon = bourbon_name
-            break
-    
-    # Check bourbon recommendations database (all tiers)
+    # TIER 2: Check static databases if not found in session
     if not found_bourbon:
-        from cigar_pairings import BOURBON_RECOMMENDATIONS
-        for tier_name, bourbons in BOURBON_RECOMMENDATIONS.items():
-            for bourbon in bourbons:
-                bourbon_lower = bourbon["name"].lower()
-                # Check full name and common abbreviations
-                if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
-                    found_bourbon = bourbon["name"].lower()
-                    break
-            if found_bourbon:
+        # Check bourbon knowledge database
+        for bourbon_name in BOURBON_KNOWLEDGE.keys():
+            if bourbon_name in msg_normalized:
+                found_bourbon = bourbon_name
+                print(f"Found bourbon in knowledge database: {found_bourbon}")
                 break
+        
+        # Check bourbon recommendations database (all tiers)
+        if not found_bourbon:
+            from cigar_pairings import BOURBON_RECOMMENDATIONS
+            for tier_name, bourbons in BOURBON_RECOMMENDATIONS.items():
+                for bourbon in bourbons:
+                    bourbon_lower = bourbon["name"].lower()
+                    # Check full name and common abbreviations
+                    if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
+                        found_bourbon = bourbon["name"].lower()
+                        print(f"Found bourbon in recommendations database: {found_bourbon}")
+                        break
+                if found_bourbon:
+                    break
     
     found_cigar_strength = None
     if "mild" in msg_lower or "light" in msg_lower:
@@ -713,6 +722,51 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
         ]
         
         r["next_step"] = "Pick your price tier and enjoy the pairing!"
+    
+    # Case 1B: TIER 3 - User mentioned unknown bourbon, use Claude API
+    elif "pair" in msg_lower and ("bourbon" in msg_lower or "whiskey" in msg_lower):
+        # Extract bourbon name from message
+        unknown_bourbon = msg_normalized
+        for remove_word in ["pair", "pairing", "cigar", "with", "for", "bourbon", "whiskey", "need", "want", "a", "an", "the"]:
+            unknown_bourbon = unknown_bourbon.replace(remove_word, "").strip()
+        
+        if unknown_bourbon and ANTHROPIC_AVAILABLE:
+            print(f"Using Claude API to find pairing for unknown bourbon: {unknown_bourbon}")
+            try:
+                prompt = f"""Recommend 3-5 cigars that pair well with {unknown_bourbon} bourbon.
+
+For each cigar, provide:
+- Name
+- Price range
+- Strength (mild/medium/full)
+- Brief tasting notes
+- Why it pairs well with this bourbon
+
+Format each as:
+Cigar: [name]
+Price: [range]
+Strength: [strength]
+Notes: [notes]
+Pairing: [why it works]
+---"""
+                
+                response = ANTHROPIC_CLIENT.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                
+                content = response.content[0].text.strip()
+                
+                r["summary"] = f"Great choice! Here are cigar pairings for {unknown_bourbon.title()}:"
+                r["key_points"] = [content]
+                r["next_step"] = "These recommendations are based on the bourbon's flavor profile."
+                
+                return r
+                
+            except Exception as e:
+                print(f"Claude API pairing error: {e}")
+                # Fall through to generic response
         
     # Case 2: User mentioned cigar strength, recommend bourbons (min 3)
     elif found_cigar_strength:
