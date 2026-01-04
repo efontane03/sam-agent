@@ -625,49 +625,49 @@ Answer:"""
         
         answer = response.content[0].text.strip()
         
-        # Clean up any duplicate sections by tracking cigar names
-        lines = answer.split('\n')
+        # SIMPLE AND ROBUST duplicate removal
+        # Split into recommendation blocks, keep only unique ones
+        blocks = []
+        current_block = []
         seen_cigars = set()
-        cleaned_lines = []
-        skip_block = False
         
-        for line in lines:
-            # Check if this is a recommendation header
+        for line in answer.split('\n'):
             if line.startswith('**Recommendation'):
-                # Extract just the cigar name (everything after the colon)
-                try:
-                    cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
-                    
-                    if cigar_name in seen_cigars:
-                        # Duplicate cigar found - skip this entire block until next recommendation
-                        skip_block = True
-                        continue
-                    else:
-                        # New unique cigar
-                        seen_cigars.add(cigar_name)
-                        skip_block = False
-                        cleaned_lines.append(line)
-                except:
-                    cleaned_lines.append(line)
-                    skip_block = False
-            elif skip_block:
-                # Skip lines until we hit a new recommendation
-                if line.startswith('**Recommendation'):
-                    # Check if this new recommendation is unique
-                    try:
-                        cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
-                        if cigar_name not in seen_cigars:
-                            seen_cigars.add(cigar_name)
-                            cleaned_lines.append(line)
-                            skip_block = False
-                    except:
-                        cleaned_lines.append(line)
-                        skip_block = False
-                continue
+                # New recommendation starting
+                if current_block:
+                    # Save previous block
+                    blocks.append('\n'.join(current_block))
+                    current_block = []
+                current_block.append(line)
+            elif current_block:
+                # Part of current recommendation block
+                current_block.append(line)
             else:
-                cleaned_lines.append(line)
+                # Not part of any recommendation, keep it
+                blocks.append(line)
         
-        answer = '\n'.join(cleaned_lines).strip()
+        # Don't forget last block
+        if current_block:
+            blocks.append('\n'.join(current_block))
+        
+        # Now filter out duplicate recommendations
+        unique_blocks = []
+        for block in blocks:
+            if block.startswith('**Recommendation'):
+                # Extract cigar name
+                try:
+                    first_line = block.split('\n')[0]
+                    cigar_name = first_line.split(':', 1)[1].strip().rstrip('*').strip().lower()
+                    if cigar_name not in seen_cigars:
+                        seen_cigars.add(cigar_name)
+                        unique_blocks.append(block)
+                    # else: skip duplicate
+                except:
+                    unique_blocks.append(block)
+            else:
+                unique_blocks.append(block)
+        
+        answer = '\n'.join(unique_blocks).strip()
         
         # Check if Claude declined (off-topic)
         if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
