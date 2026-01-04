@@ -434,10 +434,16 @@ class SamSession:
     pairing_strength: Optional[str] = None
     pairing_waiting_for_spirit: bool = False
     pairing_waiting_for_strength: bool = False
+    # Conversation memory
+    last_bourbon_discussed: Optional[str] = None
+    last_bourbon_info: Optional[Dict[str, Any]] = None
+    conversation_history: List[str] = field(default_factory=list)
     
     def __post_init__(self):
         if self.context is None or not isinstance(self.context, dict):
             self.context = {}
+        if self.conversation_history is None:
+            self.conversation_history = []
 
 _RE_ZIP = re.compile(r"\b\d{5}\b")
 
@@ -524,7 +530,45 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     info_keywords = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
     is_bourbon_query = any(keyword in msg_lower for keyword in info_keywords)
     
+    # Check if this is a follow-up question about the last bourbon discussed
+    is_followup = False
+    followup_keywords = ["how many", "what are", "which", "does it", "is it", "tell me more", "more about", "continue"]
+    if session.last_bourbon_discussed and any(kw in msg_lower for kw in followup_keywords):
+        is_followup = True
+    
     r = _blank_response("info")
+    
+    # Handle follow-up questions with Claude
+    if is_followup and ANTHROPIC_AVAILABLE and session.last_bourbon_discussed:
+        try:
+            # Use Claude to answer follow-up about the bourbon
+            context_info = ""
+            if session.last_bourbon_info:
+                context_info = f"Previous bourbon discussed: {session.last_bourbon_info.get('name', '')}"
+            
+            prompt = f"""{context_info}
+
+User's follow-up question: "{msg}"
+
+Provide a concise, informative answer to their follow-up question about this bourbon. Keep it to 2-3 sentences."""
+            
+            response = ANTHROPIC_CLIENT.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            answer = response.content[0].text.strip()
+            
+            r["summary"] = f"About {session.last_bourbon_discussed.title()}:"
+            r["key_points"] = [answer]
+            r["next_step"] = "Any other questions about this bourbon?"
+            
+            return r
+            
+        except Exception as e:
+            print(f"Error in follow-up: {e}")
+            # Fall through to normal handling
     
     if is_bourbon_query:
         # Extract the bourbon name from the query
@@ -543,6 +587,10 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
         
         if bourbon_info:
             # Found info (either from database or Claude research)
+            # Store in session for follow-ups
+            session.last_bourbon_discussed = bourbon_info.get("name", bourbon_name)
+            session.last_bourbon_info = bourbon_info
+            
             r["summary"] = f"{bourbon_info['name']} - {bourbon_info['distillery']}"
             
             r["item_list"] = [
