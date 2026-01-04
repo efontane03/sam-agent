@@ -584,9 +584,15 @@ def _answer_general_knowledge(question: str) -> Optional[Dict[str, Any]]:
 Rules:
 1. ONLY answer questions about bourbon, whiskey, spirits, or cigars
 2. If the question is off-topic (weather, sports, politics, etc.), politely decline: "I'm your bourbon & cigar expert! Let's talk spirits and sticks. Ask me about bourbon, whiskey, or cigars!"
-3. Keep answers concise (2-4 sentences)
-4. Be knowledgeable and friendly
-5. If you don't know, say so honestly
+3. For CIGAR RECOMMENDATIONS: Use bullet-style format with clear structure:
+   **Recommendation: [Cigar Name]**
+   • Price: [price range]
+   • Wrapper: [wrapper type]
+   • Flavor: [flavor notes]
+   • Why: [reason to choose]
+4. For other questions: Keep answers concise (2-4 sentences)
+5. Be knowledgeable and friendly
+6. If you don't know, say so honestly
 
 Answer:"""
         
