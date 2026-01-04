@@ -626,6 +626,41 @@ Answer:"""
         
         answer = response.content[0].text.strip()
         
+        # Clean up any duplicate sections (if Claude repeats recommendations)
+        lines = answer.split('\n')
+        seen_recommendations = set()
+        cleaned_lines = []
+        skip_until_next_recommendation = False
+        
+        for line in lines:
+            # Check if this is a recommendation header
+            if line.startswith('**Recommendation'):
+                # Extract recommendation number and cigar name
+                rec_key = line.lower()
+                if rec_key in seen_recommendations:
+                    # Duplicate found - skip this entire recommendation block
+                    skip_until_next_recommendation = True
+                    continue
+                else:
+                    seen_recommendations.add(rec_key)
+                    skip_until_next_recommendation = False
+                    cleaned_lines.append(line)
+            elif skip_until_next_recommendation:
+                # Skip lines that are part of duplicate recommendation
+                if line.startswith('**Recommendation') or line.strip() == '':
+                    skip_until_next_recommendation = False
+                    if line.startswith('**Recommendation'):
+                        # New recommendation found, check if duplicate
+                        rec_key = line.lower()
+                        if rec_key not in seen_recommendations:
+                            seen_recommendations.add(rec_key)
+                            cleaned_lines.append(line)
+                continue
+            else:
+                cleaned_lines.append(line)
+        
+        answer = '\n'.join(cleaned_lines)
+        
         # Check if Claude declined (off-topic)
         if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
             return {
