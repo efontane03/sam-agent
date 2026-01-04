@@ -382,9 +382,7 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     
     # Extract bourbon or cigar mentions
     bourbon_keywords = ["eagle rare", "buffalo trace", "maker", "weller", "booker", "stagg", 
-                       "knob creek", "wild turkey", "four roses", "elijah craig", "woodford"]
-    cigar_keywords = ["mild", "medium", "full", "maduro", "connecticut", "habano", "corojo",
-                     "padron", "fuente", "oliva", "liga", "montecristo", "cohiba"]
+                       "knob creek", "wild turkey", "four roses", "elijah craig", "woodford", "evan williams"]
     
     found_bourbon = None
     for bourbon in bourbon_keywords:
@@ -402,96 +400,104 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     
     r = _blank_response("pairing")
     
-    # Case 1: User mentioned a bourbon, recommend cigars
+    # Case 1: User mentioned a bourbon, recommend cigars (min 3)
     if found_bourbon:
         pairing_data = get_pairing_for_bourbon(found_bourbon)
+        cigars = pairing_data['recommendations']
         
-        r["summary"] = f"Great choice! For {found_bourbon.title()}, I recommend {pairing_data['recommended_cigar_strength']} cigars."
+        r["summary"] = f"Perfect! For {found_bourbon.title()}, here are {len(cigars)} cigar recommendations across all price tiers."
         
-        r["primary_pairing"] = {
-            "cigar": f"{pairing_data['recommended_cigar_strength'].title()}-bodied cigars",
-            "strength": pairing_data['recommended_cigar_strength'],
-            "pour": found_bourbon.title(),
-            "quality_tag": f"{pairing_data['proof_range']} proof",
-            "why": [
-                pairing_data.get('pairing_notes', ''),
-                f"Flavor notes: {pairing_data['flavor_notes']}"
-            ]
-        }
+        # Primary pairing (first recommendation)
+        if cigars:
+            primary = cigars[0]
+            r["primary_pairing"] = {
+                "cigar": primary["name"],
+                "strength": primary["strength"],
+                "pour": found_bourbon.title(),
+                "quality_tag": f"{primary['tier']} • {primary['price']}",
+                "why": [primary["notes"], f"Wrapper: {primary['wrapper']}"]
+            }
         
-        if pairing_data.get('cigar_examples'):
-            r["item_list"] = [
-                _item("Try these cigars", ", ".join(pairing_data['cigar_examples'][:3]))
+        # Alternative pairings (remaining recommendations)
+        if len(cigars) > 1:
+            r["alternative_pairings"] = [
+                {
+                    "cigar": cigar["name"],
+                    "strength": cigar["strength"],
+                    "pour": found_bourbon.title(),
+                    "quality_tag": f"{cigar['tier']} • {cigar['price']}",
+                    "why": [cigar["notes"], f"Wrapper: {cigar['wrapper']}"]
+                }
+                for cigar in cigars[1:]
             ]
         
         r["key_points"] = [
-            f"Match the bourbon's strength with cigar body",
-            "Sip neat or with one large ice cube",
-            "Let bourbon rest on palate before drawing"
+            f"All cigars match {pairing_data['bourbon_strength']} bourbon strength",
+            "Price range from budget to premium options",
+            "Sip bourbon neat or with one large ice cube"
         ]
         
-        r["next_step"] = "Pick up one of these cigars and enjoy!"
+        r["next_step"] = "Pick your price tier and enjoy the pairing!"
         
-    # Case 2: User mentioned cigar strength, recommend bourbons
+    # Case 2: User mentioned cigar strength, recommend bourbons (min 3)
     elif found_cigar_strength:
         pairing_data = get_pairing_for_cigar_strength(found_cigar_strength)
+        bourbons = pairing_data['recommendations']
         
-        r["summary"] = f"For {found_cigar_strength} cigars, here are my bourbon recommendations."
+        r["summary"] = f"For {found_cigar_strength} cigars, here are {len(bourbons)} bourbon recommendations across all price tiers."
         
-        bottles = pairing_data['specific_bottles']
+        # Primary pairing (first recommendation)
+        if bourbons:
+            primary = bourbons[0]
+            r["primary_pairing"] = {
+                "cigar": f"{found_cigar_strength.title()}-bodied cigar",
+                "strength": found_cigar_strength,
+                "pour": primary["name"],
+                "quality_tag": f"{primary['tier']} • {primary['price']}",
+                "why": [
+                    primary["notes"],
+                    f"Proof: {primary['proof']} • Flavor: {primary['flavor_intensity']}"
+                ]
+            }
         
-        r["primary_pairing"] = {
-            "cigar": f"{found_cigar_strength.title()}-bodied cigar",
-            "strength": found_cigar_strength,
-            "pour": bottles[0] if bottles else "Bourbon",
-            "quality_tag": "Primary recommendation",
-            "why": [
-                f"Matches {found_cigar_strength} cigar strength perfectly",
-                "Won't overpower or be overpowered by the tobacco"
-            ]
-        }
-        
-        # Alternative pairings
-        if len(bottles) > 1:
+        # Alternative pairings (remaining recommendations)
+        if len(bourbons) > 1:
             r["alternative_pairings"] = [
                 {
                     "cigar": f"{found_cigar_strength.title()}-bodied cigar",
                     "strength": found_cigar_strength,
-                    "pour": bottle,
-                    "quality_tag": "Also excellent",
-                    "why": ["Great balance with this cigar strength"]
+                    "pour": bourbon["name"],
+                    "quality_tag": f"{bourbon['tier']} • {bourbon['price']}",
+                    "why": [
+                        bourbon["notes"],
+                        f"Proof: {bourbon['proof']} • Flavor: {bourbon['flavor_intensity']}"
+                    ]
                 }
-                for bottle in bottles[1:3]
+                for bourbon in bourbons[1:]
             ]
         
-        r["key_points"] = PAIRING_TIPS[:3]
-        r["next_step"] = "Grab one of these bottles for your next smoke!"
+        r["key_points"] = [
+            "Budget to premium options for every wallet",
+            f"All match {found_cigar_strength} cigar strength perfectly",
+            "Let bourbon rest on palate before drawing"
+        ]
+        
+        r["next_step"] = "Choose your price tier and enjoy!"
         
     # Case 3: General pairing request
     else:
-        # Show a classic pairing as example
-        classic = CLASSIC_PAIRINGS[0]  # Mild Connecticut example
-        
         r["summary"] = "I can help you pair bourbon with cigars! Tell me what you're working with."
-        
-        r["primary_pairing"] = {
-            "cigar": classic["cigar_type"],
-            "strength": classic["strength"],
-            "pour": classic["bourbon"],
-            "quality_tag": "Classic pairing",
-            "why": [classic["why"]]
-        }
-        
-        r["item_list"] = [
-            _item("For mild cigars", "Maker's Mark, Buffalo Trace"),
-            _item("For medium cigars", "Eagle Rare, Knob Creek"),
-            _item("For full cigars", "Booker's, Stagg Jr.")
-        ]
         
         r["key_points"] = [
             "Tell me your bourbon or cigar strength",
             "Examples: 'pair Eagle Rare' or 'pairing for full cigar'",
-            "I'll give you perfect matches!"
+            "I'll give you 3+ matches across all price tiers!"
+        ]
+        
+        r["item_list"] = [
+            _item("For mild cigars", "Buffalo Trace ($25), Eagle Rare ($40), Woodford Double Oaked ($60)"),
+            _item("For medium cigars", "Wild Turkey 101 ($25), Knob Creek ($40), Old Forester 1920 ($65)"),
+            _item("For full cigars", "Evan Williams SB ($30), Russell's Reserve ($45), Booker's ($80)")
         ]
         
         r["next_step"] = "Ask me about a specific bourbon or cigar strength."
