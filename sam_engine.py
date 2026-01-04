@@ -592,15 +592,30 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     """Handle cigar and bourbon pairing requests."""
     msg_lower = msg.lower()
     
-    # Extract bourbon or cigar mentions
-    bourbon_keywords = ["eagle rare", "buffalo trace", "maker", "weller", "booker", "stagg", 
-                       "knob creek", "wild turkey", "four roses", "elijah craig", "woodford", "evan williams"]
+    # Normalize common variations
+    msg_normalized = msg_lower.replace("4 roses", "four roses").replace("wt", "wild turkey")
     
+    # Check ALL bourbons in our databases instead of hardcoded keywords
     found_bourbon = None
-    for bourbon in bourbon_keywords:
-        if bourbon in msg_lower:
-            found_bourbon = bourbon
+    
+    # Check bourbon knowledge database
+    for bourbon_name in BOURBON_KNOWLEDGE.keys():
+        if bourbon_name in msg_normalized:
+            found_bourbon = bourbon_name
             break
+    
+    # Check bourbon recommendations database (all tiers)
+    if not found_bourbon:
+        from cigar_pairings import BOURBON_RECOMMENDATIONS
+        for tier_name, bourbons in BOURBON_RECOMMENDATIONS.items():
+            for bourbon in bourbons:
+                bourbon_lower = bourbon["name"].lower()
+                # Check full name and common abbreviations
+                if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
+                    found_bourbon = bourbon["name"].lower()
+                    break
+            if found_bourbon:
+                break
     
     found_cigar_strength = None
     if "mild" in msg_lower or "light" in msg_lower:
