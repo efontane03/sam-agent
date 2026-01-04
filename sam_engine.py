@@ -584,33 +584,32 @@ def _answer_general_knowledge(question: str) -> Optional[Dict[str, Any]]:
 Rules:
 1. ONLY answer questions about bourbon, whiskey, spirits, or cigars
 2. If the question is off-topic (weather, sports, politics, etc.), politely decline: "I'm your bourbon & cigar expert! Let's talk spirits and sticks. Ask me about bourbon, whiskey, or cigars!"
-3. For CIGAR RECOMMENDATIONS: 
-   - Provide 2-3 DIFFERENT cigars
-   - NO preamble, start directly with recommendations
-   - Use this EXACT format:
-   
-   **Recommendation 1: [Cigar Name]**
-   • Price: [price range]
-   • Wrapper: [wrapper type]
-   • Flavor: [flavor notes]
-   • Why: [reason to choose]
-   
-   **Recommendation 2: [DIFFERENT Cigar Name]**
-   • Price: [price range]
-   • Wrapper: [wrapper type]
-   • Flavor: [flavor notes]
-   • Why: [reason to choose]
-   
-   **Recommendation 3: [DIFFERENT Cigar Name]**
-   • Price: [price range]
-   • Wrapper: [wrapper type]
-   • Flavor: [flavor notes]
-   • Why: [reason to choose]
-   
-   CRITICAL: 
-   - Each recommendation MUST be a different cigar
-   - Do NOT include introductory text like "here are my picks"
-   - Start directly with "**Recommendation 1:**"
+3. For CIGAR RECOMMENDATIONS, follow this EXACT format (example):
+
+**Recommendation 1: Arturo Fuente Hemingway**
+• Price: $9-13
+• Wrapper: Cameroon
+• Flavor: Cedar, nuts, subtle pepper
+• Why: Perfectly balanced medium-bodied smoke
+
+**Recommendation 2: Padron 2000 Natural**
+• Price: $6-8
+• Wrapper: Nicaraguan Natural
+• Flavor: Earth, cocoa, leather
+• Why: Exceptional value with full flavor
+
+**Recommendation 3: Oliva Serie G**
+• Price: $4-6
+• Wrapper: Cameroon
+• Flavor: Mild cedar, cream, toast
+• Why: Budget-friendly daily smoke
+
+CRITICAL RULES:
+- Provide exactly 2-3 DIFFERENT cigars
+- Each must be a UNIQUE cigar (different name)
+- Start directly with **Recommendation 1:** (no intro text)
+- Do NOT repeat any cigar name
+- Do NOT add preamble like "here are my picks"
 
 4. For other questions: Keep answers concise (2-4 sentences)
 5. Be knowledgeable and friendly
@@ -631,7 +630,6 @@ Answer:"""
         seen_cigars = set()
         cleaned_lines = []
         skip_block = False
-        current_cigar = None
         
         for line in lines:
             # Check if this is a recommendation header
@@ -641,42 +639,35 @@ Answer:"""
                     cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
                     
                     if cigar_name in seen_cigars:
-                        # Duplicate cigar found - skip this block
+                        # Duplicate cigar found - skip this entire block until next recommendation
                         skip_block = True
-                        current_cigar = cigar_name
                         continue
                     else:
                         # New unique cigar
                         seen_cigars.add(cigar_name)
                         skip_block = False
-                        current_cigar = cigar_name
                         cleaned_lines.append(line)
                 except:
-                    # If parsing fails, keep the line
                     cleaned_lines.append(line)
                     skip_block = False
             elif skip_block:
-                # Skip lines until we hit a new recommendation or empty line
-                if line.startswith('**Recommendation') or (line.strip() == '' and not line.startswith('•')):
-                    skip_block = False
-                    # Re-process this line
-                    if line.startswith('**Recommendation'):
-                        try:
-                            cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
-                            if cigar_name not in seen_cigars:
-                                seen_cigars.add(cigar_name)
-                                cleaned_lines.append(line)
-                                skip_block = False
-                            else:
-                                skip_block = True
-                        except:
+                # Skip lines until we hit a new recommendation
+                if line.startswith('**Recommendation'):
+                    # Check if this new recommendation is unique
+                    try:
+                        cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
+                        if cigar_name not in seen_cigars:
+                            seen_cigars.add(cigar_name)
                             cleaned_lines.append(line)
                             skip_block = False
+                    except:
+                        cleaned_lines.append(line)
+                        skip_block = False
                 continue
             else:
                 cleaned_lines.append(line)
         
-        answer = '\n'.join(cleaned_lines)
+        answer = '\n'.join(cleaned_lines).strip()
         
         # Check if Claude declined (off-topic)
         if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
