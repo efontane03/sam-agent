@@ -427,9 +427,7 @@ class SamSession:
     context: Dict[str, Any] = field(default_factory=dict)
     last_mode: SamMode = "info"
     hunt_area: Optional[str] = None
-    hunt_target_bottle: Optional[str] = None
     hunt_waiting_for_area: bool = False
-    hunt_waiting_for_target: bool = False
     pairing_spirit: Optional[str] = None
     pairing_strength: Optional[str] = None
     pairing_waiting_for_spirit: bool = False
@@ -489,7 +487,7 @@ def _infer_mode(text: str, session: SamSession) -> SamMode:
     if any(h in t for h in hunt_hits) or _extract_zip(t):
         return "hunt"
     
-    if session.hunt_waiting_for_area or session.hunt_waiting_for_target:
+    if session.hunt_waiting_for_area:
         return "hunt"
     if session.pairing_waiting_for_spirit or session.pairing_waiting_for_strength:
         return "pairing"
@@ -838,50 +836,40 @@ Pairing: [why it works]
     return r
 
 def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
+    """Handle allocation store hunting - location-based only, no specific bottles."""
+    
+    # If waiting for location, capture it
     if session.hunt_waiting_for_area:
         session.hunt_area = _extract_zip(msg) or msg
         session.hunt_waiting_for_area = False
-        session.hunt_waiting_for_target = True
-        return _hunt_clarify_target(session)
-    
-    if session.hunt_waiting_for_target:
-        session.hunt_target_bottle = msg
-        session.hunt_waiting_for_target = False
         return _hunt_plan(session)
     
+    # Extract location from current message
     area = _extract_location_from_message(msg) or session.hunt_area
     
+    # If no location found, ask for it
     if not area:
         session.hunt_waiting_for_area = True
         return _hunt_clarify_area(session)
     
-    session.hunt_area = area or msg
-    
-    if not session.hunt_target_bottle:
-        session.hunt_waiting_for_target = True
-        return _hunt_clarify_target(session)
-    
+    # Have location, execute hunt plan
+    session.hunt_area = area
     return _hunt_plan(session)
 
 def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
     r = _blank_response("hunt")
-    r["summary"] = "I need your hunt area and target."
-    r["key_points"] = ["Send ZIP or city/state", "Tell me target bottle or 'best shops'"]
-    r["next_step"] = "Reply with location."
-    return r
-
-def _hunt_clarify_target(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-    area = session.hunt_area or "your area"
-    r["summary"] = f"In {area}, what's the target?"
-    r["key_points"] = ["Give 1-3 targets or 'best allocation shops'"]
-    r["next_step"] = "Reply with target bottle."
+    r["summary"] = "Where should I look for allocation stores?"
+    r["key_points"] = [
+        "Send ZIP code (e.g., 30344)",
+        "Or city/state (e.g., Atlanta, GA)"
+    ]
+    r["next_step"] = "Reply with your location."
     return r
 
 def _hunt_plan(session: SamSession) -> Dict[str, Any]:
+    """Generate allocation store hunt plan for a location."""
     r = _blank_response("hunt")
     area = session.hunt_area or "your area"
-    target = session.hunt_target_bottle or "your target"
     
     area_hint = session.hunt_area or area
     resolved_area, stops = _build_hunt_stops(area_hint)
@@ -889,7 +877,7 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     if resolved_area:
         area = resolved_area
     
-    # Check if we have curated stores
+    # Check if we have curated stores with allocation indicators
     has_curated = any(
         "🎟️" in stop.get("notes", "") or
         "🎰" in stop.get("notes", "") or
@@ -901,18 +889,18 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     )
     
     if has_curated:
-        r["summary"] = f"Hunt plan for {target} in {area}. Showing verified allocation stores + additional options."
+        r["summary"] = f"Hunt plan for allocation stores in {area}."
         r["key_points"] = [
-            "⭐ Stores with icons (🎟️🎰📋⭐🏃💰) have VERIFIED allocation systems",
-            "Call ahead to confirm current allocation process",
-            "Ask about delivery days, raffle timing, or list signup"
+            "⭐ Icons (🎟️🎰📋⭐🏃💰) show VERIFIED allocation methods",
+            "Call ahead: Ask about allocation process, delivery days, raffle timing",
+            "No guarantees on specific bottles - stores get different allocations"
         ]
     else:
-        r["summary"] = f"Hunt plan for {target} in {area}."
+        r["summary"] = f"Allocation stores in {area}."
         r["key_points"] = [
-            "Call 3-5 shops, ask allocation process",
-            "Show up delivery days (usually Thu/Fri)",
-            "Ask how to qualify for allocated bottles"
+            "Call 3-5 shops and ask about their allocation process",
+            "Ask: When do you get allocated bottles? How does your raffle/list work?",
+            "Show up on delivery days (usually Thu/Fri) for best chances"
         ]
     
     if stops:
@@ -922,7 +910,7 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
         loc_hint = str(area_hint or "").strip()
         center_lat, center_lng = 33.7490, -84.3880
         r["stops"] = [
-            _stop("Local Liquor Store", f"Near {loc_hint}", "Call and ask about allocations.", center_lat, center_lng),
+            _stop("Local Liquor Store", f"Near {loc_hint}", "Call and ask about allocation process.", center_lat, center_lng),
         ]
     
     r["next_step"] = "Call these shops and ask about their allocation process."
