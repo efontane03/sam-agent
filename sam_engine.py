@@ -13,8 +13,14 @@ import urllib.parse
 import urllib.error
 import os
 
-# Import curated database
+# Import curated databases
 from allocation_stores import ALLOCATION_STORES, CITY_ALIASES, get_allocation_stores_for_city
+from cigar_pairings import (
+    get_pairing_for_cigar_strength, 
+    get_pairing_for_bourbon,
+    CLASSIC_PAIRINGS,
+    PAIRING_TIPS
+)
 
 SamMode = Literal["info", "pairing", "hunt", "clarify"]
 
@@ -363,7 +369,126 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     return r
 
 def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
-    return _blank_response("pairing")
+    """Handle cigar and bourbon pairing requests."""
+    msg_lower = msg.lower()
+    
+    # Extract bourbon or cigar mentions
+    bourbon_keywords = ["eagle rare", "buffalo trace", "maker", "weller", "booker", "stagg", 
+                       "knob creek", "wild turkey", "four roses", "elijah craig", "woodford"]
+    cigar_keywords = ["mild", "medium", "full", "maduro", "connecticut", "habano", "corojo",
+                     "padron", "fuente", "oliva", "liga", "montecristo", "cohiba"]
+    
+    found_bourbon = None
+    for bourbon in bourbon_keywords:
+        if bourbon in msg_lower:
+            found_bourbon = bourbon
+            break
+    
+    found_cigar_strength = None
+    if "mild" in msg_lower or "light" in msg_lower:
+        found_cigar_strength = "mild"
+    elif "full" in msg_lower or "strong" in msg_lower or "bold" in msg_lower:
+        found_cigar_strength = "full"
+    elif "medium" in msg_lower:
+        found_cigar_strength = "medium"
+    
+    r = _blank_response("pairing")
+    
+    # Case 1: User mentioned a bourbon, recommend cigars
+    if found_bourbon:
+        pairing_data = get_pairing_for_bourbon(found_bourbon)
+        
+        r["summary"] = f"Great choice! For {found_bourbon.title()}, I recommend {pairing_data['recommended_cigar_strength']} cigars."
+        
+        r["primary_pairing"] = {
+            "cigar": f"{pairing_data['recommended_cigar_strength'].title()}-bodied cigars",
+            "strength": pairing_data['recommended_cigar_strength'],
+            "pour": found_bourbon.title(),
+            "quality_tag": f"{pairing_data['proof_range']} proof",
+            "why": [
+                pairing_data.get('pairing_notes', ''),
+                f"Flavor notes: {pairing_data['flavor_notes']}"
+            ]
+        }
+        
+        if pairing_data.get('cigar_examples'):
+            r["item_list"] = [
+                _item("Try these cigars", ", ".join(pairing_data['cigar_examples'][:3]))
+            ]
+        
+        r["key_points"] = [
+            f"Match the bourbon's strength with cigar body",
+            "Sip neat or with one large ice cube",
+            "Let bourbon rest on palate before drawing"
+        ]
+        
+        r["next_step"] = "Pick up one of these cigars and enjoy!"
+        
+    # Case 2: User mentioned cigar strength, recommend bourbons
+    elif found_cigar_strength:
+        pairing_data = get_pairing_for_cigar_strength(found_cigar_strength)
+        
+        r["summary"] = f"For {found_cigar_strength} cigars, here are my bourbon recommendations."
+        
+        bottles = pairing_data['specific_bottles']
+        
+        r["primary_pairing"] = {
+            "cigar": f"{found_cigar_strength.title()}-bodied cigar",
+            "strength": found_cigar_strength,
+            "pour": bottles[0] if bottles else "Bourbon",
+            "quality_tag": "Primary recommendation",
+            "why": [
+                f"Matches {found_cigar_strength} cigar strength perfectly",
+                "Won't overpower or be overpowered by the tobacco"
+            ]
+        }
+        
+        # Alternative pairings
+        if len(bottles) > 1:
+            r["alternative_pairings"] = [
+                {
+                    "cigar": f"{found_cigar_strength.title()}-bodied cigar",
+                    "strength": found_cigar_strength,
+                    "pour": bottle,
+                    "quality_tag": "Also excellent",
+                    "why": ["Great balance with this cigar strength"]
+                }
+                for bottle in bottles[1:3]
+            ]
+        
+        r["key_points"] = PAIRING_TIPS[:3]
+        r["next_step"] = "Grab one of these bottles for your next smoke!"
+        
+    # Case 3: General pairing request
+    else:
+        # Show a classic pairing as example
+        classic = CLASSIC_PAIRINGS[0]  # Mild Connecticut example
+        
+        r["summary"] = "I can help you pair bourbon with cigars! Tell me what you're working with."
+        
+        r["primary_pairing"] = {
+            "cigar": classic["cigar_type"],
+            "strength": classic["strength"],
+            "pour": classic["bourbon"],
+            "quality_tag": "Classic pairing",
+            "why": [classic["why"]]
+        }
+        
+        r["item_list"] = [
+            _item("For mild cigars", "Maker's Mark, Buffalo Trace"),
+            _item("For medium cigars", "Eagle Rare, Knob Creek"),
+            _item("For full cigars", "Booker's, Stagg Jr.")
+        ]
+        
+        r["key_points"] = [
+            "Tell me your bourbon or cigar strength",
+            "Examples: 'pair Eagle Rare' or 'pairing for full cigar'",
+            "I'll give you perfect matches!"
+        ]
+        
+        r["next_step"] = "Ask me about a specific bourbon or cigar strength."
+    
+    return r
 
 def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
     if session.hunt_waiting_for_area:
