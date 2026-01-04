@@ -626,35 +626,52 @@ Answer:"""
         
         answer = response.content[0].text.strip()
         
-        # Clean up any duplicate sections (if Claude repeats recommendations)
+        # Clean up any duplicate sections by tracking cigar names
         lines = answer.split('\n')
-        seen_recommendations = set()
+        seen_cigars = set()
         cleaned_lines = []
-        skip_until_next_recommendation = False
+        skip_block = False
+        current_cigar = None
         
         for line in lines:
             # Check if this is a recommendation header
             if line.startswith('**Recommendation'):
-                # Extract recommendation number and cigar name
-                rec_key = line.lower()
-                if rec_key in seen_recommendations:
-                    # Duplicate found - skip this entire recommendation block
-                    skip_until_next_recommendation = True
-                    continue
-                else:
-                    seen_recommendations.add(rec_key)
-                    skip_until_next_recommendation = False
+                # Extract just the cigar name (everything after the colon)
+                try:
+                    cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
+                    
+                    if cigar_name in seen_cigars:
+                        # Duplicate cigar found - skip this block
+                        skip_block = True
+                        current_cigar = cigar_name
+                        continue
+                    else:
+                        # New unique cigar
+                        seen_cigars.add(cigar_name)
+                        skip_block = False
+                        current_cigar = cigar_name
+                        cleaned_lines.append(line)
+                except:
+                    # If parsing fails, keep the line
                     cleaned_lines.append(line)
-            elif skip_until_next_recommendation:
-                # Skip lines that are part of duplicate recommendation
-                if line.startswith('**Recommendation') or line.strip() == '':
-                    skip_until_next_recommendation = False
+                    skip_block = False
+            elif skip_block:
+                # Skip lines until we hit a new recommendation or empty line
+                if line.startswith('**Recommendation') or (line.strip() == '' and not line.startswith('•')):
+                    skip_block = False
+                    # Re-process this line
                     if line.startswith('**Recommendation'):
-                        # New recommendation found, check if duplicate
-                        rec_key = line.lower()
-                        if rec_key not in seen_recommendations:
-                            seen_recommendations.add(rec_key)
+                        try:
+                            cigar_name = line.split(':', 1)[1].strip().rstrip('*').strip().lower()
+                            if cigar_name not in seen_cigars:
+                                seen_cigars.add(cigar_name)
+                                cleaned_lines.append(line)
+                                skip_block = False
+                            else:
+                                skip_block = True
+                        except:
                             cleaned_lines.append(line)
+                            skip_block = False
                 continue
             else:
                 cleaned_lines.append(line)
