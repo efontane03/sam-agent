@@ -625,6 +625,11 @@ Answer:"""
         
         answer = response.content[0].text.strip()
         
+        print(f"\n{'='*60}")
+        print("RAW CLAUDE OUTPUT:")
+        print(answer)
+        print(f"{'='*60}\n")
+        
         # SIMPLE AND ROBUST duplicate removal
         # Split into recommendation blocks, keep only unique ones
         blocks = []
@@ -650,6 +655,11 @@ Answer:"""
         if current_block:
             blocks.append('\n'.join(current_block))
         
+        print(f"FOUND {len(blocks)} BLOCKS")
+        for i, block in enumerate(blocks):
+            print(f"\nBLOCK {i}:")
+            print(block[:100] + "..." if len(block) > 100 else block)
+        
         # Now filter out duplicate recommendations
         unique_blocks = []
         for block in blocks:
@@ -658,16 +668,26 @@ Answer:"""
                 try:
                     first_line = block.split('\n')[0]
                     cigar_name = first_line.split(':', 1)[1].strip().rstrip('*').strip().lower()
+                    print(f"\nChecking cigar: '{cigar_name}'")
                     if cigar_name not in seen_cigars:
+                        print(f"  → KEEPING (unique)")
                         seen_cigars.add(cigar_name)
                         unique_blocks.append(block)
+                    else:
+                        print(f"  → SKIPPING (duplicate)")
                     # else: skip duplicate
-                except:
+                except Exception as e:
+                    print(f"  → ERROR parsing: {e}, keeping anyway")
                     unique_blocks.append(block)
             else:
                 unique_blocks.append(block)
         
         answer = '\n'.join(unique_blocks).strip()
+        
+        print(f"\n{'='*60}")
+        print("CLEANED OUTPUT:")
+        print(answer)
+        print(f"{'='*60}\n")
         
         # Check if Claude declined (off-topic)
         if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
@@ -678,8 +698,8 @@ Answer:"""
             }
         
         return {
-            "summary": answer[:80] + "..." if len(answer) > 80 else answer,
-            "key_points": [answer],
+            "summary": "",  # Don't duplicate in summary
+            "key_points": [answer],  # Full cleaned answer here
             "next_step": "Any other bourbon, whiskey, or cigar questions?"
         }
         
