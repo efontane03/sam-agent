@@ -642,22 +642,33 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     """Handle cigar and bourbon pairing requests."""
     msg_lower = msg.lower()
     
-    # Normalize common variations
-    msg_normalized = msg_lower.replace("4 roses", "four roses").replace("wt", "wild turkey")
+    # Normalize common variations and apostrophes
+    msg_normalized = (msg_lower
+                     .replace("4 roses", "four roses")
+                     .replace("wt", "wild turkey")
+                     .replace("'s", "s")  # booker's → bookers
+                     .replace("'", ""))    # remove remaining apostrophes
     
     # TIER 1: Check session memory first (if user just discussed a bourbon)
     found_bourbon = None
     if session.last_bourbon_discussed:
-        bourbon_lower = session.last_bourbon_discussed.lower()
-        if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
+        bourbon_lower = session.last_bourbon_discussed.lower().replace("'s", "s").replace("'", "")
+        bourbon_words = bourbon_lower.split()
+        
+        # Check if bourbon name or any significant word from it is in the message
+        if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
             found_bourbon = session.last_bourbon_discussed.lower()
             print(f"Found bourbon from session memory: {found_bourbon}")
     
     # TIER 2: Check static databases if not found in session
     if not found_bourbon:
-        # Check bourbon knowledge database
+        # Check bourbon knowledge database with fuzzy matching
         for bourbon_name in BOURBON_KNOWLEDGE.keys():
-            if bourbon_name in msg_normalized:
+            bourbon_normalized = bourbon_name.replace("'s", "s").replace("'", "")
+            bourbon_words = bourbon_normalized.split()
+            
+            # Check full name or significant words
+            if bourbon_normalized in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
                 found_bourbon = bourbon_name
                 print(f"Found bourbon in knowledge database: {found_bourbon}")
                 break
@@ -667,9 +678,11 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
             from cigar_pairings import BOURBON_RECOMMENDATIONS
             for tier_name, bourbons in BOURBON_RECOMMENDATIONS.items():
                 for bourbon in bourbons:
-                    bourbon_lower = bourbon["name"].lower()
-                    # Check full name and common abbreviations
-                    if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_lower.split()):
+                    bourbon_lower = bourbon["name"].lower().replace("'s", "s").replace("'", "")
+                    bourbon_words = bourbon_lower.split()
+                    
+                    # Check full name or significant words
+                    if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
                         found_bourbon = bourbon["name"].lower()
                         print(f"Found bourbon in recommendations database: {found_bourbon}")
                         break
