@@ -23,6 +23,118 @@ from cigar_pairings import (
 )
 from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 
+# Anthropic API for dynamic bourbon research
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_CLIENT = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    ANTHROPIC_AVAILABLE = True
+except:
+    ANTHROPIC_CLIENT = None
+    ANTHROPIC_AVAILABLE = False
+    print("WARNING: Anthropic API not available - bourbon research will be limited to database")
+
+def _research_bourbon_with_claude(bourbon_name: str) -> Optional[Dict[str, Any]]:
+    """Use Claude API to research a bourbon and return structured information."""
+    if not ANTHROPIC_AVAILABLE or not ANTHROPIC_CLIENT:
+        return None
+    
+    try:
+        prompt = f"""Research the bourbon called "{bourbon_name}" and provide detailed information in this exact format:
+
+Name: [Full official name]
+Distillery: [Distillery name and location]
+Proof: [Proof number]
+Age: [Age statement or "No age statement"]
+Price Range: [Typical retail price range]
+Availability: [Widely available/Semi-allocated/Allocated/Ultra-rare]
+Mashbill: [Grain percentages or description]
+
+Tasting Notes (provide exactly 4 bullet points):
+- [Note 1]
+- [Note 2]
+- [Note 3]
+- [Note 4]
+
+Why It's Great: [One sentence about what makes this bourbon special]
+
+Fun Fact: [One interesting fact about this bourbon]
+
+If this bourbon doesn't exist or you can't find reliable information, respond with: "BOURBON_NOT_FOUND"
+"""
+        
+        response = ANTHROPIC_CLIENT.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        content = response.content[0].text.strip()
+        
+        # Check if bourbon was not found
+        if "BOURBON_NOT_FOUND" in content:
+            return None
+        
+        # Parse the response into structured format
+        lines = content.split('\n')
+        bourbon_info = {
+            "name": "",
+            "distillery": "",
+            "location": "",
+            "proof": 0,
+            "age": "",
+            "price_range": "",
+            "availability": "",
+            "mashbill": "",
+            "tasting_notes": [],
+            "why_its_great": "",
+            "fun_fact": ""
+        }
+        
+        current_section = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            if line.startswith("Name:"):
+                bourbon_info["name"] = line.replace("Name:", "").strip()
+            elif line.startswith("Distillery:"):
+                bourbon_info["distillery"] = line.replace("Distillery:", "").strip()
+            elif line.startswith("Proof:"):
+                proof_str = line.replace("Proof:", "").strip()
+                try:
+                    bourbon_info["proof"] = int(''.join(filter(str.isdigit, proof_str)))
+                except:
+                    bourbon_info["proof"] = proof_str
+            elif line.startswith("Age:"):
+                bourbon_info["age"] = line.replace("Age:", "").strip()
+            elif line.startswith("Price Range:"):
+                bourbon_info["price_range"] = line.replace("Price Range:", "").strip()
+            elif line.startswith("Availability:"):
+                bourbon_info["availability"] = line.replace("Availability:", "").strip()
+            elif line.startswith("Mashbill:"):
+                bourbon_info["mashbill"] = line.replace("Mashbill:", "").strip()
+            elif "Tasting Notes" in line:
+                current_section = "tasting"
+            elif line.startswith("Why It's Great:"):
+                bourbon_info["why_its_great"] = line.replace("Why It's Great:", "").strip()
+                current_section = None
+            elif line.startswith("Fun Fact:"):
+                bourbon_info["fun_fact"] = line.replace("Fun Fact:", "").strip()
+                current_section = None
+            elif current_section == "tasting" and line.startswith("-"):
+                bourbon_info["tasting_notes"].append(line.replace("-", "").strip())
+        
+        # Validate we got enough information
+        if bourbon_info["name"] and bourbon_info["distillery"]:
+            return bourbon_info
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error researching bourbon with Claude: {e}")
+        return None
+
 def _provide_bourbon_research_guidance(bourbon_name: str) -> Dict[str, Any]:
     """Provide guidance on researching a bourbon not in our database."""
     return {
@@ -405,7 +517,7 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         return _coerce_jsonable(base)
 
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
-    """Handle bourbon information requests - provides info or research guidance."""
+    """Handle bourbon information requests - uses database or Claude API research."""
     msg_lower = msg.lower()
     
     # Check if user is asking about a specific bourbon
@@ -424,8 +536,13 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
         # First check hardcoded database for instant results
         bourbon_info = get_bourbon_info(bourbon_name)
         
+        if not bourbon_info and ANTHROPIC_AVAILABLE:
+            # Not in database - research with Claude API
+            print(f"Researching '{bourbon_name}' with Claude API...")
+            bourbon_info = _research_bourbon_with_claude(bourbon_name)
+        
         if bourbon_info:
-            # Found in database - provide detailed info instantly
+            # Found info (either from database or Claude research)
             r["summary"] = f"{bourbon_info['name']} - {bourbon_info['distillery']}"
             
             r["item_list"] = [
@@ -441,7 +558,7 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
             r["next_step"] = f"{bourbon_info['why_its_great']} Fun fact: {bourbon_info['fun_fact']}"
             
         else:
-            # Not in database - provide research guidance
+            # Could not find info even with Claude - provide research guidance
             research = _provide_bourbon_research_guidance(bourbon_name)
             
             r["summary"] = research["summary"]
@@ -457,7 +574,7 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
                 "• Look for distillery, proof, age, and tasting notes"
             ]
             
-            r["next_step"] = f"I'll add {bourbon_name.title()} to my database soon! For now, check BreakingBourbon.com or r/bourbon for reviews."
+            r["next_step"] = f"I couldn't find reliable information on {bourbon_name.title()}. Try BreakingBourbon.com or r/bourbon for reviews."
         
     else:
         # General info mode
