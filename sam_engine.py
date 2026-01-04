@@ -21,6 +21,7 @@ from cigar_pairings import (
     CLASSIC_PAIRINGS,
     PAIRING_TIPS
 )
+from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 
 SamMode = Literal["info", "pairing", "hunt", "clarify"]
 
@@ -325,8 +326,16 @@ def _extract_location_from_message(msg: str) -> Optional[str]:
 
 def _infer_mode(text: str, session: SamSession) -> SamMode:
     t = (text or "").lower().strip()
-    hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt"]
+    hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt", "find"]
     pairing_hits = ["pair", "pairing", "cigar", "stick", "smoke"]
+    info_hits = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
+    
+    # Check for bourbon info requests
+    if any(h in t for h in info_hits):
+        # Check if they're asking about a known bourbon
+        for bourbon_name in BOURBON_KNOWLEDGE.keys():
+            if bourbon_name in t:
+                return "info"
     
     if any(h in t for h in hunt_hits) or _extract_zip(t):
         return "hunt"
@@ -370,10 +379,46 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         return _coerce_jsonable(base)
 
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
+    """Handle bourbon information requests and general info."""
+    msg_lower = msg.lower()
+    
+    # Check if user is asking about a specific bourbon
+    bourbon_info = None
+    for bourbon_name in BOURBON_KNOWLEDGE.keys():
+        if bourbon_name in msg_lower:
+            bourbon_info = get_bourbon_info(bourbon_name)
+            break
+    
     r = _blank_response("info")
-    r["summary"] = "Tell me what you're working with and I'll guide you."
-    r["key_points"] = ["For cigar pairing: say spirit + strength", "For hunt: include ZIP or city"]
-    r["next_step"] = "Try: 'pair cigar with Eagle Rare' or '30344 best shops'"
+    
+    if bourbon_info:
+        # User asked about a specific bourbon - provide detailed info
+        r["summary"] = f"{bourbon_info['name']} - {bourbon_info['distillery']}"
+        
+        r["item_list"] = [
+            _item("Distillery", bourbon_info["distillery"]),
+            _item("Proof", str(bourbon_info["proof"])),
+            _item("Age", bourbon_info["age"]),
+            _item("Price Range", bourbon_info["price_range"]),
+            _item("Availability", bourbon_info["availability"]),
+            _item("Mashbill", bourbon_info["mashbill"])
+        ]
+        
+        r["key_points"] = bourbon_info["tasting_notes"]
+        
+        # Add why it's great and fun fact as next step
+        r["next_step"] = f"{bourbon_info['why_its_great']} Fun fact: {bourbon_info['fun_fact']}"
+        
+    else:
+        # General info mode
+        r["summary"] = "Tell me what you're working with and I'll guide you."
+        r["key_points"] = [
+            "For bourbon info: 'tell me about Eagle Rare'",
+            "For cigar pairing: 'pair cigar with Maker's Mark'",
+            "For hunt: include ZIP or city like '30344 best shops'"
+        ]
+        r["next_step"] = "Try asking about a bourbon, pairing, or hunting for allocations!"
+    
     return r
 
 def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
