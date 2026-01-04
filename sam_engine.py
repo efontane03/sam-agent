@@ -52,7 +52,15 @@ def _http_get_json(url: str, timeout: int = 8) -> Any:
     return json.loads(raw)
 
 def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
-    params = {"format": "json", "q": q, "limit": "1"}
+    """Geocode a location query. Handles US zip codes specially."""
+    query = str(q).strip()
+    
+    # Check if it's a US zip code (5 digits)
+    if re.match(r'^\d{5}$', query):
+        # Add USA to zip code queries to avoid international confusion
+        query = f"{query}, USA"
+    
+    params = {"format": "json", "q": query, "limit": "1"}
     url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(params)
     try:
         data = _http_get_json(url, timeout=8)
