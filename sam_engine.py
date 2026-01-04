@@ -470,7 +470,7 @@ def _extract_location_from_message(msg: str) -> Optional[str]:
 
 def _infer_mode(text: str, session: SamSession) -> SamMode:
     t = (text or "").lower().strip()
-    hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt", "find"]
+    hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt"]
     pairing_hits = ["pair", "pairing", "cigar", "stick", "smoke"]
     info_hits = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
     
@@ -481,10 +481,14 @@ def _infer_mode(text: str, session: SamSession) -> SamMode:
             if bourbon_name in t:
                 return "info"
     
-    if any(h in t for h in hunt_hits) or _extract_zip(t):
-        return "hunt"
+    # Check pairing FIRST (more specific than hunt keywords like "find")
     if any(h in t for h in pairing_hits):
         return "pairing"
+    
+    # Then check hunt mode
+    if any(h in t for h in hunt_hits) or _extract_zip(t):
+        return "hunt"
+    
     if session.hunt_waiting_for_area or session.hunt_waiting_for_target:
         return "hunt"
     if session.pairing_waiting_for_spirit or session.pairing_waiting_for_strength:
