@@ -490,17 +490,43 @@ def _extract_location_from_message(msg: str) -> Optional[str]:
 def _infer_mode(text: str, session: SamSession) -> SamMode:
     t = (text or "").lower().strip()
     hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt"]
-    pairing_hits = ["pair", "pairing", "cigar", "stick", "smoke"]
-    info_hits = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
+    pairing_hits = ["pair", "pairing"]
     
-    # Check for bourbon info requests
-    if any(h in t for h in info_hits):
-        # Check if they're asking about a known bourbon (main or dynamic database)
+    # Expanded info hits for general bourbon/whiskey/cigar knowledge
+    bourbon_whiskey_keywords = [
+        "whiskey", "whisky", "bourbon", "rye", "scotch", "irish", "japanese",
+        "tennessee whiskey", "distillery", "distilled", "proof", "age", "barrel",
+        "mashbill", "grain", "corn", "wheat", "malted", "varieties", "brands", "makes"
+    ]
+    
+    cigar_keywords = [
+        "cigar", "cigars", "stick", "smoke", "wrapper", "binder", "filler", 
+        "maduro", "connecticut", "habano", "ring gauge", "vitola", 
+        "torpedo", "robusto", "churchill", "cut", "light", "ash", "draw", "burn"
+    ]
+    
+    question_patterns = [
+        "tell me about", "what is", "what's", "about", "info on", "explain", "describe",
+        "how is", "how do", "how does", "what makes", "what's the difference",
+        "varieties", "types of", "kinds of", "difference between"
+    ]
+    
+    # Check for bourbon/whiskey/cigar content in the query
+    has_bourbon_whiskey = any(kw in t for kw in bourbon_whiskey_keywords)
+    has_cigar = any(kw in t for kw in cigar_keywords)
+    has_question_pattern = any(pattern in t for pattern in question_patterns)
+    
+    # If asking about bourbon/whiskey/cigar topics, go to info mode
+    if (has_bourbon_whiskey or has_cigar) and (has_question_pattern or "?" in t):
+        return "info"
+    
+    # Check for specific bourbon names in database
+    if any(h in t for h in ["tell me about", "what is", "what's", "about", "info on"]):
         for bourbon_name in list(BOURBON_KNOWLEDGE.keys()) + list(BOURBON_KNOWLEDGE_DYNAMIC.keys()):
             if bourbon_name in t:
                 return "info"
     
-    # Check pairing FIRST (more specific than hunt keywords like "find")
+    # Check pairing FIRST (more specific than hunt keywords)
     if any(h in t for h in pairing_hits):
         return "pairing"
     
@@ -545,13 +571,58 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         base["summary"] = f"Error: {type(e).__name__}: {e}"
         return _coerce_jsonable(base)
 
+def _answer_general_knowledge(question: str) -> Optional[Dict[str, Any]]:
+    """Use Claude API to answer general bourbon/whiskey/cigar knowledge questions."""
+    if not ANTHROPIC_AVAILABLE or not ANTHROPIC_CLIENT:
+        return None
+    
+    try:
+        prompt = f"""You are Sam, a bourbon and cigar expert. Answer this question about bourbon, whiskey, or cigars:
+
+"{question}"
+
+Rules:
+1. ONLY answer questions about bourbon, whiskey, spirits, or cigars
+2. If the question is off-topic (weather, sports, politics, etc.), politely decline: "I'm your bourbon & cigar expert! Let's talk spirits and sticks. Ask me about bourbon, whiskey, or cigars!"
+3. Keep answers concise (2-4 sentences)
+4. Be knowledgeable and friendly
+5. If you don't know, say so honestly
+
+Answer:"""
+        
+        response = ANTHROPIC_CLIENT.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        answer = response.content[0].text.strip()
+        
+        # Check if Claude declined (off-topic)
+        if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
+            return {
+                "summary": "Let's stay on topic!",
+                "key_points": [answer],
+                "next_step": "Ask me about bourbon, whiskey, cigars, or pairings!"
+            }
+        
+        return {
+            "summary": answer[:80] + "..." if len(answer) > 80 else answer,
+            "key_points": [answer],
+            "next_step": "Any other bourbon, whiskey, or cigar questions?"
+        }
+        
+    except Exception as e:
+        print(f"Error in general knowledge: {e}")
+        return None
+
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     """Handle bourbon information requests - uses database or Claude API research."""
     msg_lower = msg.lower()
     
-    # Check if user is asking about a specific bourbon
+    # Check if user is asking about a specific bourbon (not a general question)
     info_keywords = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
-    is_bourbon_query = any(keyword in msg_lower for keyword in info_keywords)
+    is_specific_bourbon_query = any(keyword in msg_lower for keyword in info_keywords[:4])  # Only first 4 are specific
     
     # Check if this is a follow-up question about the last bourbon discussed
     is_followup = False
@@ -593,7 +664,8 @@ Provide a concise, informative answer to their follow-up question about this bou
             print(f"Error in follow-up: {e}")
             # Fall through to normal handling
     
-    if is_bourbon_query:
+    # Check if asking about a SPECIFIC bourbon (not a general question)
+    if is_specific_bourbon_query:
         # Extract the bourbon name from the query
         bourbon_name = msg_lower
         for keyword in info_keywords:
@@ -653,7 +725,14 @@ Provide a concise, informative answer to their follow-up question about this bou
             r["next_step"] = f"I couldn't find reliable information on {bourbon_name.title()}. Try BreakingBourbon.com or r/bourbon for reviews."
         
     else:
-        # General info mode
+        # General bourbon/whiskey/cigar knowledge question - use Claude API
+        if ANTHROPIC_AVAILABLE:
+            general_answer = _answer_general_knowledge(msg)
+            if general_answer:
+                r.update(general_answer)
+                return r
+        
+        # Fallback if Claude API not available
         r["summary"] = "Tell me what you're working with and I'll guide you."
         r["key_points"] = [
             "For bourbon info: 'tell me about Eagle Rare'",
