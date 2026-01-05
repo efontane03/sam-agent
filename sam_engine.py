@@ -249,6 +249,24 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
         'gas station', 'convenience', 'mini mart', 'smoke shop'
     ]
     
+    # BEER-ONLY EXCLUSIONS - Do NOT include beer-focused establishments
+    BEER_EXCLUSIONS = [
+        'beer garden', 'beergarden',
+        'brewery', 'brewing', 'brewpub', 'brew pub',
+        'taproom', 'tap room', 'tasting room',
+        'beer bar', 'beer junction', 'beer only',
+        'pub', 'tavern', 'alehouse', 'ale house'
+    ]
+    
+    # VALID LIQUOR STORE TERMS (including regional variations)
+    LIQUOR_STORE_INDICATORS = [
+        'liquor', 'spirits', 'wine & spirits', 'wine and spirits',
+        'package store', 'packie',
+        'abc store', 'state store',
+        'liquor outlet', 'liquor mart', 'liquor depot',
+        'spirit shop', 'beverage depot'
+    ]
+    
     out = []
     try:
         params = {"location": f"{lat},{lng}", "radius": str(radius_m), "type": "liquor_store", "key": _GOOGLE_API_KEY}
@@ -263,7 +281,7 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             name = place.get("name", "Liquor Store")
             name_lower = name.lower().strip()
             
-            # Check excluded chains
+            # STEP 1: Check excluded chains
             is_excluded = False
             for chain in EXCLUDED_CHAINS:
                 if chain in name_lower:
@@ -273,26 +291,44 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             if is_excluded:
                 continue
             
-            # Additional name-based filtering for food stores, delis, markets
+            # STEP 2: EXCLUDE BEER-ONLY ESTABLISHMENTS
+            is_beer_only = False
+            for beer_term in BEER_EXCLUSIONS:
+                if beer_term in name_lower:
+                    print(f"DEBUG: Skipping beer establishment: {name}")
+                    is_beer_only = True
+                    break
+            if is_beer_only:
+                continue
+            
+            # STEP 3: Verify it's actually a liquor store (not just beer)
+            has_liquor_indicator = any(indicator in name_lower for indicator in LIQUOR_STORE_INDICATORS)
+            
+            # If name has "beer" but no liquor indicators, skip it
+            if 'beer' in name_lower and not has_liquor_indicator:
+                print(f"DEBUG: Skipping beer-focused store without liquor indicators: {name}")
+                continue
+            
+            # STEP 4: Additional name-based filtering for food stores, delis, markets
             food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
             if any(keyword in name_lower for keyword in food_keywords):
                 # Only keep if name ALSO has strong liquor indicators
-                if not any(liquor_kw in name_lower for liquor_kw in ['liquor', 'wine & spirits', 'wine and spirits', 'beverage depot']):
+                if not has_liquor_indicator:
                     print(f"DEBUG: Skipping food-focused store: {name}")
                     continue
             
             place_types = place.get("types", [])
             
-            # Skip gas stations and convenience stores unless they're clearly liquor-focused
+            # STEP 5: Skip gas stations and convenience stores unless they're clearly liquor-focused
             if "gas_station" in place_types or "convenience_store" in place_types:
-                if not any(kw in name_lower for kw in ['liquor', 'wine', 'spirits', 'beverage']):
+                if not has_liquor_indicator:
                     print(f"DEBUG: Skipping convenience: {name}")
                     continue
             
-            # Skip grocery stores, delis, and food-focused places
+            # STEP 6: Skip grocery stores, delis, and food-focused places
             if any(t in place_types for t in ["grocery_or_supermarket", "supermarket", "store"]):
                 # Only keep if they have "liquor_store" type AND liquor-related keywords in name
-                if "liquor_store" not in place_types or not any(kw in name_lower for kw in ['liquor', 'wine', 'spirits', 'beverage', 'beer']):
+                if "liquor_store" not in place_types or not has_liquor_indicator:
                     print(f"DEBUG: Skipping grocery/food store: {name}")
                     continue
             
