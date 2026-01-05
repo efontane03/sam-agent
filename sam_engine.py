@@ -277,9 +277,14 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             print(f"Google Places API error: {data.get('status')}")
             return []
         
+        total_results = len(data.get("results", []))
+        print(f"DEBUG: Google Places returned {total_results} total results")
+        
         for place in data.get("results", []):
             name = place.get("name", "Liquor Store")
             name_lower = name.lower().strip()
+            
+            print(f"DEBUG: Checking place: {name}")
             
             # STEP 1: Check excluded chains
             is_excluded = False
@@ -354,12 +359,14 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             
             if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
                 out.append(_stop(name=name, address=address, notes=notes, lat=float(place_lat), lng=float(place_lng)))
+                print(f"DEBUG: ✅ KEPT: {name}")
             
             if len(out) >= limit:
                 break
     except Exception as e:
         print(f"Google Places error: {type(e).__name__}: {e}")
     
+    print(f"DEBUG: Google Places final results: {len(out)} stores passed all filters")
     return out
 
 def _convert_curated_to_stops(curated_stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
