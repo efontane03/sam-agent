@@ -413,12 +413,29 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
     1. First checking curated database
     2. Falling back to Google Places if no curated data
     3. Merging both if available
+    
+    Search strategy:
+    - CITY NAME: Wide search (25km radius) for comprehensive city-wide results
+    - ZIP CODE: Focused search (8km radius) for local neighborhood stores
     """
     hint = str(area_hint or "").strip()
     if not hint:
         hint = "Atlanta, GA"
     
     print(f"DEBUG: Building stops for area_hint='{area_hint}'")
+    
+    # Determine if this is a ZIP code or city name
+    is_zip_code = bool(_extract_zip(hint))
+    
+    # Set radius based on search type
+    if is_zip_code:
+        search_radius = 8000  # 8km (5 miles) - focused local search
+        search_limit = 8
+        print(f"DEBUG: ZIP code detected - using focused radius: {search_radius}m")
+    else:
+        search_radius = 25000  # 25km (15.5 miles) - comprehensive city-wide search
+        search_limit = 15
+        print(f"DEBUG: City name detected - using wide radius: {search_radius}m")
     
     # Step 1: Check curated database
     curated_stores = get_allocation_stores_for_city(hint)
@@ -438,8 +455,8 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
         print(f"DEBUG: Geocoded '{hint}' to {lat}, {lng}")
         
         if _GOOGLE_API_KEY:
-            # Search with Google Places
-            google_stops = _google_places_liquor_stores(lat, lng, radius_m=8000, limit=8)
+            # Search with Google Places using appropriate radius
+            google_stops = _google_places_liquor_stores(lat, lng, radius_m=search_radius, limit=search_limit)
             if google_stops:
                 print(f"DEBUG: Found {len(google_stops)} stores via Google Places")
     
@@ -456,8 +473,9 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
             seen_names.add(name_key)
             unique_stops.append(stop)
     
-    # Limit to top 10
-    final_stops = unique_stops[:10]
+    # Limit based on search type
+    max_results = 10 if is_zip_code else 15
+    final_stops = unique_stops[:max_results]
     
     if final_stops:
         print(f"DEBUG: Returning {len(final_stops)} total stops ({len(curated_stops)} curated + {len(google_stops)} Google)")
