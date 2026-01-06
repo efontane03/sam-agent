@@ -24,6 +24,17 @@ from cigar_pairings import (
 from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 from bourbon_knowledge_dynamic import get_bourbon_info_dynamic, add_bourbon_to_dynamic_database, BOURBON_KNOWLEDGE_DYNAMIC
 
+# State-aware retail system for allocation hunting
+from state_retail_systems import (
+    get_state_retail_system,
+    format_hunt_response,
+    get_hunt_plan_template
+)
+from store_filters import (
+    filter_stores_by_state_system,
+    build_search_query
+)
+
 # Anthropic API for dynamic bourbon research
 try:
     from anthropic import Anthropic
@@ -233,39 +244,11 @@ def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
     except Exception:
         return None
 
-def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
-    """Search for liquor stores using Google Places API with chain filtering."""
+def _google_places_liquor_stores(lat: float, lng: float, state: str = None, radius_m: int = 8000, limit: int = 8):
+    """Search for liquor stores using Google Places API with state-aware filtering."""
     if not _GOOGLE_API_KEY:
         print("WARNING: No Google Places API key")
         return []
-    
-    EXCLUDED_CHAINS = [
-        'cvs', 'walgreens', 'rite aid', 'target', 'walmart', 'costco',
-        '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
-        'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
-        'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b',
-        'food lion', 'giant', 'stop & shop', 'stop and shop',
-        'food store', 'grocery', 'market', 'deli', 'meat market',
-        'gas station', 'convenience', 'mini mart', 'smoke shop'
-    ]
-    
-    # BEER-ONLY EXCLUSIONS - Do NOT include beer-focused establishments
-    BEER_EXCLUSIONS = [
-        'beer garden', 'beergarden',
-        'brewery', 'brewing', 'brewpub', 'brew pub',
-        'taproom', 'tap room', 'tasting room',
-        'beer bar', 'beer junction', 'beer only',
-        'pub', 'tavern', 'alehouse', 'ale house'
-    ]
-    
-    # VALID LIQUOR STORE TERMS (including regional variations)
-    LIQUOR_STORE_INDICATORS = [
-        'liquor', 'spirits', 'wine & spirits', 'wine and spirits',
-        'package store', 'packie',
-        'abc store', 'state store',
-        'liquor outlet', 'liquor mart', 'liquor depot',
-        'spirit shop', 'beverage depot'
-    ]
     
     out = []
     try:
@@ -280,69 +263,38 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
         total_results = len(data.get("results", []))
         print(f"DEBUG: Google Places returned {total_results} total results")
         
+        # Convert Google Places results to standard format for filtering
+        places = []
         for place in data.get("results", []):
             name = place.get("name", "Liquor Store")
-            name_lower = name.lower().strip()
-            
-            print(f"DEBUG: Checking place: {name}")
-            
-            # STEP 1: Check excluded chains
-            is_excluded = False
-            for chain in EXCLUDED_CHAINS:
-                if chain in name_lower:
-                    print(f"DEBUG: Skipping chain: {name}")
-                    is_excluded = True
-                    break
-            if is_excluded:
-                continue
-            
-            # STEP 2: EXCLUDE BEER-ONLY ESTABLISHMENTS
-            is_beer_only = False
-            for beer_term in BEER_EXCLUSIONS:
-                if beer_term in name_lower:
-                    print(f"DEBUG: Skipping beer establishment: {name}")
-                    is_beer_only = True
-                    break
-            if is_beer_only:
-                continue
-            
-            # STEP 3: Verify it's actually a liquor store (not just beer)
-            has_liquor_indicator = any(indicator in name_lower for indicator in LIQUOR_STORE_INDICATORS)
-            
-            # If name has "beer" but no liquor indicators, skip it
-            if 'beer' in name_lower and not has_liquor_indicator:
-                print(f"DEBUG: Skipping beer-focused store without liquor indicators: {name}")
-                continue
-            
-            # STEP 4: Additional name-based filtering for food stores, delis, markets
-            food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
-            if any(keyword in name_lower for keyword in food_keywords):
-                # Only keep if name ALSO has strong liquor indicators
-                if not has_liquor_indicator:
-                    print(f"DEBUG: Skipping food-focused store: {name}")
-                    continue
-            
             place_types = place.get("types", [])
-            
-            # STEP 5: Skip gas stations and convenience stores unless they're clearly liquor-focused
-            if "gas_station" in place_types or "convenience_store" in place_types:
-                if not has_liquor_indicator:
-                    print(f"DEBUG: Skipping convenience: {name}")
-                    continue
-            
-            # STEP 6: Skip grocery stores, delis, and food-focused places
-            if any(t in place_types for t in ["grocery_or_supermarket", "supermarket", "store"]):
-                # Only keep if they have "liquor_store" type AND liquor-related keywords in name
-                if "liquor_store" not in place_types or not has_liquor_indicator:
-                    print(f"DEBUG: Skipping grocery/food store: {name}")
-                    continue
-            
+            address = place.get("vicinity", "")
             place_lat = place.get("geometry", {}).get("location", {}).get("lat")
             place_lng = place.get("geometry", {}).get("location", {}).get("lng")
-            address = place.get("vicinity", "")
             
+            places.append({
+                "name": name,
+                "types": place_types,
+                "address": address,
+                "lat": place_lat,
+                "lng": place_lng,
+                "place_id": place.get("place_id")
+            })
+        
+        # Apply state-aware filtering if state is provided
+        if state and places:
+            print(f"DEBUG: Applying state-aware filtering for {state}")
+            filtered_places = filter_stores_by_state_system(places, state, debug=True)
+            print(f"DEBUG: After state filtering: {len(filtered_places)} stores")
+        else:
+            # Fallback to basic filtering if no state provided
+            print("DEBUG: No state provided, using basic filtering")
+            filtered_places = _basic_liquor_store_filter(places)
+        
+        # Convert filtered results to stops format with phone numbers
+        for place_dict in filtered_places[:limit]:
             phone = None
-            place_id = place.get("place_id")
+            place_id = place_dict.get("place_id")
             if place_id:
                 try:
                     details_params = {"place_id": place_id, "fields": "formatted_phone_number", "key": _GOOGLE_API_KEY}
@@ -357,17 +309,100 @@ def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, l
             if phone:
                 notes = f"Call {phone}. Ask about allocation process."
             
-            if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
-                out.append(_stop(name=name, address=address, notes=notes, lat=float(place_lat), lng=float(place_lng)))
-                print(f"DEBUG: ✅ KEPT: {name}")
+            place_lat = place_dict.get("lat")
+            place_lng = place_dict.get("lng")
             
-            if len(out) >= limit:
-                break
+            if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
+                out.append(_stop(
+                    name=place_dict["name"],
+                    address=place_dict["address"],
+                    notes=notes,
+                    lat=float(place_lat),
+                    lng=float(place_lng)
+                ))
+                print(f"DEBUG: ✅ ADDED TO RESULTS: {place_dict['name']}")
+            
     except Exception as e:
         print(f"Google Places error: {type(e).__name__}: {e}")
     
-    print(f"DEBUG: Google Places final results: {len(out)} stores passed all filters")
+    print(f"DEBUG: Google Places final results: {len(out)} stores")
     return out
+
+
+def _basic_liquor_store_filter(places: List[Dict]) -> List[Dict]:
+    """Basic filtering when no state is provided - uses original logic."""
+    EXCLUDED_CHAINS = [
+        'cvs', 'walgreens', 'rite aid', 'target', 'walmart', 'costco',
+        '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
+        'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
+        'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b',
+        'food lion', 'giant', 'stop & shop', 'stop and shop',
+        'food store', 'grocery', 'market', 'deli', 'meat market',
+        'gas station', 'convenience', 'mini mart', 'smoke shop'
+    ]
+    
+    BEER_EXCLUSIONS = [
+        'beer garden', 'beergarden',
+        'brewery', 'brewing', 'brewpub', 'brew pub',
+        'taproom', 'tap room', 'tasting room',
+        'beer bar', 'beer junction', 'beer only',
+        'pub', 'tavern', 'alehouse', 'ale house'
+    ]
+    
+    LIQUOR_STORE_INDICATORS = [
+        'liquor', 'spirits', 'wine & spirits', 'wine and spirits',
+        'package store', 'packie',
+        'abc store', 'state store',
+        'liquor outlet', 'liquor mart', 'liquor depot',
+        'spirit shop', 'beverage depot'
+    ]
+    
+    filtered = []
+    for place in places:
+        name = place.get("name", "")
+        name_lower = name.lower().strip()
+        place_types = place.get("types", [])
+        
+        # Check excluded chains
+        if any(chain in name_lower for chain in EXCLUDED_CHAINS):
+            print(f"DEBUG: Skipping chain: {name}")
+            continue
+        
+        # Exclude beer-only establishments
+        if any(beer_term in name_lower for beer_term in BEER_EXCLUSIONS):
+            print(f"DEBUG: Skipping beer establishment: {name}")
+            continue
+        
+        # Verify it's a liquor store
+        has_liquor_indicator = any(indicator in name_lower for indicator in LIQUOR_STORE_INDICATORS)
+        
+        if 'beer' in name_lower and not has_liquor_indicator:
+            print(f"DEBUG: Skipping beer-focused store: {name}")
+            continue
+        
+        # Skip food stores without liquor indicators
+        food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
+        if any(keyword in name_lower for keyword in food_keywords):
+            if not has_liquor_indicator:
+                print(f"DEBUG: Skipping food store: {name}")
+                continue
+        
+        # Skip gas stations/convenience without liquor indicators
+        if "gas_station" in place_types or "convenience_store" in place_types:
+            if not has_liquor_indicator:
+                print(f"DEBUG: Skipping convenience: {name}")
+                continue
+        
+        # Skip grocery stores
+        if any(t in place_types for t in ["grocery_or_supermarket", "supermarket"]):
+            if "liquor_store" not in place_types or not has_liquor_indicator:
+                print(f"DEBUG: Skipping grocery: {name}")
+                continue
+        
+        filtered.append(place)
+        print(f"DEBUG: ✓ Including: {name}")
+    
+    return filtered
 
 def _convert_curated_to_stops(curated_stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Convert curated store format to stops format."""
@@ -431,6 +466,16 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
     
     print(f"DEBUG: Building stops for area_hint='{area_hint}'")
     
+    # Extract state from area_hint (e.g., "Seattle, WA" -> "WA")
+    state = None
+    if "," in hint:
+        parts = hint.split(",")
+        if len(parts) == 2:
+            state_part = parts[1].strip().upper()
+            if len(state_part) == 2:
+                state = state_part
+                print(f"DEBUG: Extracted state: {state}")
+    
     # Determine if this is a ZIP code or city name
     is_zip_code = bool(_extract_zip(hint))
     
@@ -462,8 +507,8 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
         print(f"DEBUG: Geocoded '{hint}' to {lat}, {lng}")
         
         if _GOOGLE_API_KEY:
-            # Search with Google Places using appropriate radius
-            google_stops = _google_places_liquor_stores(lat, lng, radius_m=search_radius, limit=search_limit)
+            # Search with Google Places using appropriate radius and state-aware filtering
+            google_stops = _google_places_liquor_stores(lat, lng, state=state, radius_m=search_radius, limit=search_limit)
             if google_stops:
                 print(f"DEBUG: Found {len(google_stops)} stores via Google Places")
     
@@ -1164,7 +1209,7 @@ def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
     return r
 
 def _hunt_plan(session: SamSession) -> Dict[str, Any]:
-    """Generate allocation store hunt plan for a location."""
+    """Generate allocation store hunt plan for a location with state-aware guidance."""
     r = _blank_response("hunt")
     area = session.hunt_area or "your area"
     
@@ -1173,6 +1218,29 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     
     if resolved_area:
         area = resolved_area
+    
+    # Extract state for state-specific guidance
+    state = None
+    if "," in area:
+        parts = area.split(",")
+        if len(parts) == 2:
+            state_part = parts[1].strip().upper()
+            if len(state_part) == 2:
+                state = state_part
+    
+    # Get state-specific retail system info
+    state_guidance = None
+    if state:
+        try:
+            system_type, config = get_state_retail_system(state)
+            state_guidance = {
+                "system_type": system_type,
+                "name": config["name"],
+                "strategy": config["allocation_tip"]
+            }
+            print(f"DEBUG: State retail system for {state}: {system_type}")
+        except Exception as e:
+            print(f"DEBUG: Could not get state guidance: {e}")
     
     # Check if we have curated stores with allocation indicators
     has_curated = any(
@@ -1194,11 +1262,20 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
         ]
     else:
         r["summary"] = f"Allocation stores in {area}."
-        r["key_points"] = [
-            "Call 3-5 shops and ask about their allocation process",
-            "Ask: When do you get allocated bottles? How does your raffle/list work?",
-            "Show up on delivery days (usually Thu/Fri) for best chances"
-        ]
+        
+        # Use state-specific guidance if available
+        if state_guidance:
+            r["key_points"] = [
+                f"🗺️ {state} Market: {state_guidance['name']}",
+                f"💡 Strategy: {state_guidance['strategy']}",
+                "📞 Call shops to learn their specific allocation process"
+            ]
+        else:
+            r["key_points"] = [
+                "Call 3-5 shops and ask about their allocation process",
+                "Ask: When do you get allocated bottles? How does your raffle/list work?",
+                "Show up on delivery days (usually Thu/Fri) for best chances"
+            ]
     
     if stops:
         r["stops"] = stops
