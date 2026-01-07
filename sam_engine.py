@@ -874,12 +874,7 @@ Answer naturally like you're having a conversation, not reading a textbook. Keep
                 _item("What to look for", ", ".join(research["what_to_look_for"][:3]))
             ]
             
-            r["key_points"] = [
-                "Here's how to research this bourbon:",
-                f"• Search: '{bourbon_name} bourbon review'",
-                f"• Check trusted sources: {research['trusted_sources'][0]}",
-                "• Look for distillery, proof, age, and tasting notes"
-            ]
+            r["key_points"] = research["research_tips"]
             
             r["next_step"] = f"I couldn't find reliable information on {bourbon_name.title()}. Try BreakingBourbon.com or r/bourbon for reviews."
         
