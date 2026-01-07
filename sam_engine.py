@@ -169,8 +169,7 @@ def _provide_bourbon_research_guidance(bourbon_name: str) -> Dict[str, Any]:
         "what_to_look_for": [
             "Distillery and location",
             "Proof/ABV and age statement",
-            "Mashbill (corn, rye, wheat percentages)"
-        ],
+            "Mashbill (corn, rye, wheat percentages)",
             "Price range and availability"
         ]
     }
