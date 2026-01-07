@@ -782,28 +782,59 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     is_specific_bourbon_query = any(keyword in msg_lower for keyword in info_keywords[:4])  # Only first 4 are specific
     
     # Check if this is a follow-up question about the last bourbon discussed
+    # Detect both explicit follow-ups AND ambiguous pronoun references
     is_followup = False
     followup_keywords = ["how many", "what are", "which", "does it", "is it", "tell me more", "more about", "continue"]
-    if session.last_bourbon_discussed and any(kw in msg_lower for kw in followup_keywords):
-        is_followup = True
+    pronoun_keywords = ["they", "it", "that", "this", "their", "its", "them", "those", "these"]
+    ambiguous_keywords = ["other batches", "other expressions", "other bottles", "what else", "more info"]
+    
+    if session.last_bourbon_discussed:
+        # Explicit follow-up keywords
+        if any(kw in msg_lower for kw in followup_keywords):
+            is_followup = True
+        # Ambiguous pronoun references (when no bourbon name is in the message)
+        elif any(pronoun in msg_lower for pronoun in pronoun_keywords):
+            # Check if there's no specific bourbon name mentioned
+            has_bourbon_name = False
+            for bourbon_name in list(BOURBON_KNOWLEDGE.keys()) + list(BOURBON_KNOWLEDGE_DYNAMIC.keys()):
+                if bourbon_name.lower() in msg_lower:
+                    has_bourbon_name = True
+                    break
+            if not has_bourbon_name:
+                is_followup = True
+                print(f"Detected ambiguous pronoun reference - assuming user means: {session.last_bourbon_discussed}")
+        # Ambiguous phrases like "other batches"
+        elif any(phrase in msg_lower for phrase in ambiguous_keywords):
+            is_followup = True
+            print(f"Detected ambiguous question - assuming user means: {session.last_bourbon_discussed}")
     
     r = _blank_response("info")
     
-    # Handle follow-up questions with Claude
+    # Handle follow-up questions with Claude + confirmation
     if is_followup and ANTHROPIC_AVAILABLE and session.last_bourbon_discussed:
         try:
-            # Use Claude to answer follow-up about the bourbon
-            context_info = ""
+            # Use Claude to answer follow-up about the bourbon WITH CONFIRMATION
+            context_info = f"Previous bourbon discussed: {session.last_bourbon_discussed}"
             if session.last_bourbon_info:
-                context_info = f"Previous bourbon discussed: {session.last_bourbon_info.get('name', '')}"
+                context_info += f"\n{session.last_bourbon_info.get('name', '')}"
             
-            prompt = f"""You're Sam - a bourbon enthusiast chatting with a friend. Keep it casual and conversational.
+            prompt = f"""You're Sam chatting with a friend about bourbon. They just asked an ambiguous follow-up question.
 
 {context_info}
 
-User's follow-up: "{msg}"
+User's ambiguous question: "{msg}"
 
-Answer naturally like you're having a conversation, not reading a textbook. Keep it to 2-3 sentences unless they want more detail."""
+IMPORTANT: Since their question was ambiguous (using "they", "it", "other batches", etc.), you need to:
+1. Start by CONFIRMING you're talking about {session.last_bourbon_discussed}
+2. Then briefly answer their question
+
+Format:
+"You're asking about [bourbon name from context], right? [Brief 1-2 sentence answer]"
+
+Example:
+"You're asking about Four Roses batches, right? They've got several great expressions - Small Batch, Single Barrel, and their limited edition releases."
+
+Keep it conversational and natural."""
             
             response = ANTHROPIC_CLIENT.messages.create(
                 model="claude-sonnet-4-20250514",
