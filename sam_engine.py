@@ -506,9 +506,11 @@ class SamSession:
     pairing_strength: Optional[str] = None
     pairing_waiting_for_spirit: bool = False
     pairing_waiting_for_strength: bool = False
-    # Conversation memory
+    # Conversation memory - track BOTH bourbon and cigar
     last_bourbon_discussed: Optional[str] = None
     last_bourbon_info: Optional[Dict[str, Any]] = None
+    last_cigar_discussed: Optional[str] = None
+    last_cigar_info: Optional[Dict[str, Any]] = None
     conversation_history: List[str] = field(default_factory=list)
     
     def __post_init__(self):
@@ -624,7 +626,7 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
         base["summary"] = f"Error: {type(e).__name__}: {e}"
         return _coerce_jsonable(base)
 
-def _answer_general_knowledge(question: str) -> Optional[Dict[str, Any]]:
+def _answer_general_knowledge(question: str, session: Optional[SamSession] = None) -> Optional[Dict[str, Any]]:
     """Use Claude API to answer general bourbon/whiskey/cigar knowledge questions."""
     if not ANTHROPIC_AVAILABLE or not ANTHROPIC_CLIENT:
         return None
@@ -734,6 +736,22 @@ Answer:"""
         print(answer)
         print(f"{'='*60}\n")
         
+        # Track cigars mentioned in the response (for context)
+        if session:
+            KNOWN_CIGAR_BRANDS = [
+                "rocky patel", "padron", "arturo fuente", "oliva", "cohiba", "montecristo",
+                "davidoff", "ashton", "my father", "liga privada", "drew estate", "macanudo",
+                "romeo y julieta", "partagas", "hoyo de monterrey", "punch", "cao", "acid"
+            ]
+            
+            question_lower = question.lower()
+            # Check if user asked about a specific cigar
+            for brand in KNOWN_CIGAR_BRANDS:
+                if brand in question_lower:
+                    session.last_cigar_discussed = brand.title()
+                    print(f"Tracked cigar in session: {session.last_cigar_discussed}")
+                    break
+        
         # Check if Claude declined (off-topic)
         if "bourbon & cigar expert" in answer or "spirits and sticks" in answer.lower():
             return {
@@ -775,23 +793,36 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     
     # If it's about a cigar, use general knowledge mode (Claude API)
     if is_cigar_query and ANTHROPIC_AVAILABLE:
-        return _answer_general_knowledge(msg)
+        return _answer_general_knowledge(msg, session)
     
     # Check if user is asking about a specific bourbon (not a general question)
     info_keywords = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
     is_specific_bourbon_query = any(keyword in msg_lower for keyword in info_keywords[:4])  # Only first 4 are specific
     
-    # Check if this is a follow-up question about the last bourbon discussed
-    # Detect both explicit follow-ups AND ambiguous pronoun references
-    is_followup = False
+    # SMART CONTEXT DETECTION: Figure out what "it" refers to
+    # Is the user asking about a bourbon OR asking about bourbon pairings for a cigar?
+    is_followup_bourbon = False
+    is_followup_cigar_pairing = False
+    
     followup_keywords = ["how many", "what are", "which", "does it", "is it", "tell me more", "more about", "continue"]
     pronoun_keywords = ["they", "it", "that", "this", "their", "its", "them", "those", "these"]
     ambiguous_keywords = ["other batches", "other expressions", "other bottles", "what else", "more info"]
     
-    if session.last_bourbon_discussed:
+    # Detect if asking about bourbon pairings (for a cigar)
+    pairing_keywords = ["pair", "pairing", "bourbon", "whiskey", "what bourbon", "which bourbon", "what whiskey"]
+    
+    # Check if user is asking about bourbon pairings for the last cigar
+    if session.last_cigar_discussed and any(pair_kw in msg_lower for pair_kw in pairing_keywords):
+        # They're asking about bourbon pairings for the cigar
+        if any(pronoun in msg_lower for pronoun in pronoun_keywords):
+            is_followup_cigar_pairing = True
+            print(f"Detected: User asking about bourbon pairings for cigar: {session.last_cigar_discussed}")
+    
+    # Otherwise check if asking about the bourbon
+    elif session.last_bourbon_discussed:
         # Explicit follow-up keywords
         if any(kw in msg_lower for kw in followup_keywords):
-            is_followup = True
+            is_followup_bourbon = True
         # Ambiguous pronoun references (when no bourbon name is in the message)
         elif any(pronoun in msg_lower for pronoun in pronoun_keywords):
             # Check if there's no specific bourbon name mentioned
@@ -801,17 +832,74 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
                     has_bourbon_name = True
                     break
             if not has_bourbon_name:
-                is_followup = True
+                is_followup_bourbon = True
                 print(f"Detected ambiguous pronoun reference - assuming user means: {session.last_bourbon_discussed}")
         # Ambiguous phrases like "other batches"
         elif any(phrase in msg_lower for phrase in ambiguous_keywords):
-            is_followup = True
+            is_followup_bourbon = True
             print(f"Detected ambiguous question - assuming user means: {session.last_bourbon_discussed}")
+    
+    # Handle cigar pairing follow-ups (bourbon recommendations for a cigar)
+    if is_followup_cigar_pairing:
+        # User wants bourbon recommendations for the cigar they just discussed
+        print(f"Routing to pairing mode: bourbon recommendations for {session.last_cigar_discussed}")
+        
+        # Get bourbon pairings for the cigar strength
+        # First, determine the cigar's strength from session
+        cigar_strength = "medium"  # default
+        if session.last_cigar_info:
+            cigar_strength = session.last_cigar_info.get("strength", "medium").lower()
+        
+        # Get bourbon recommendations
+        pairing_data = get_pairing_for_cigar_strength(cigar_strength)
+        bourbons = pairing_data['recommendations']
+        
+        r = _blank_response("pairing")
+        r["summary"] = f"You're asking what bourbons pair well with {session.last_cigar_discussed}, right? Here's what I'd pour:"
+        
+        # Primary pairing
+        if bourbons:
+            primary = bourbons[0]
+            r["primary_pairing"] = {
+                "cigar": f"{session.last_cigar_discussed}",
+                "strength": cigar_strength,
+                "pour": primary["name"],
+                "quality_tag": f"{primary['tier']} • {primary['price']}",
+                "why": [
+                    primary["notes"],
+                    f"Proof: {primary['proof']} • Flavor: {primary['flavor_intensity']}"
+                ]
+            }
+        
+        # Alternative pairings
+        if len(bourbons) > 1:
+            r["alternative_pairings"] = [
+                {
+                    "cigar": f"{session.last_cigar_discussed}",
+                    "strength": cigar_strength,
+                    "pour": bourbon["name"],
+                    "quality_tag": f"{bourbon['tier']} • {bourbon['price']}",
+                    "why": [
+                        bourbon["notes"],
+                        f"Proof: {bourbon['proof']} • Flavor: {bourbon['flavor_intensity']}"
+                    ]
+                }
+                for bourbon in bourbons[1:]
+            ]
+        
+        r["key_points"] = [
+            f"All bourbons match {cigar_strength}-bodied cigar profile",
+            "Price range from budget to premium options",
+            "Sip neat or with one large ice cube"
+        ]
+        
+        r["next_step"] = "Pick your bottle and enjoy the pairing!"
+        return r
     
     r = _blank_response("info")
     
-    # Handle follow-up questions with Claude + confirmation
-    if is_followup and ANTHROPIC_AVAILABLE and session.last_bourbon_discussed:
+    # Handle bourbon follow-up questions with Claude + confirmation
+    if is_followup_bourbon and ANTHROPIC_AVAILABLE and session.last_bourbon_discussed:
         try:
             # Use Claude to answer follow-up about the bourbon WITH CONFIRMATION
             context_info = f"Previous bourbon discussed: {session.last_bourbon_discussed}"
@@ -912,7 +1000,7 @@ Keep it conversational and natural."""
     else:
         # General bourbon/whiskey/cigar knowledge question - use Claude API
         if ANTHROPIC_AVAILABLE:
-            general_answer = _answer_general_knowledge(msg)
+            general_answer = _answer_general_knowledge(msg, session)
             if general_answer:
                 r.update(general_answer)
                 return r
@@ -1051,6 +1139,10 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
                 "quality_tag": f"{primary.get('tier', 'budget')} • {primary.get('price', '$5-10')}",
                 "why": [primary.get("notes", "Great pairing"), f"Wrapper: {primary.get('wrapper', 'Natural')}"]
             }
+            
+            # Track the primary cigar for follow-up context
+            session.last_cigar_discussed = primary.get("name", "Cigar")
+            session.last_cigar_info = primary
         
         # Alternative pairings (remaining recommendations)
         if len(cigars) > 1:
@@ -1168,6 +1260,64 @@ CRITICAL: Each must be DIFFERENT cigars. Start with **Recommendation 1:** - no i
         ]
         
         r["next_step"] = "Choose your price tier and enjoy!"
+    
+    # Case 2B: User mentioned specific cigar name, recommend bourbons
+    # Detect if a known cigar name is in the message
+    elif session.last_cigar_discussed and "cigar" in msg_lower:
+        # User is asking about bourbon pairings for a specific cigar
+        cigar_name = session.last_cigar_discussed
+        cigar_strength = session.last_cigar_info.get("strength", "medium") if session.last_cigar_info else "medium"
+        
+        # Map cigar strength to bourbon recommendations
+        if "full" in cigar_strength.lower():
+            strength = "full"
+        elif "mild" in cigar_strength.lower():
+            strength = "mild"
+        else:
+            strength = "medium"
+        
+        pairing_data = get_pairing_for_cigar_strength(strength)
+        bourbons = pairing_data['recommendations']
+        
+        r["summary"] = f"Ah, {cigar_name}! Here are my top bourbon picks:"
+        
+        # Primary pairing
+        if bourbons:
+            primary = bourbons[0]
+            r["primary_pairing"] = {
+                "cigar": cigar_name,
+                "strength": cigar_strength,
+                "pour": primary["name"],
+                "quality_tag": f"{primary['tier']} • {primary['price']}",
+                "why": [
+                    primary["notes"],
+                    f"Proof: {primary['proof']} • Flavor: {primary['flavor_intensity']}"
+                ]
+            }
+        
+        # Alternative pairings
+        if len(bourbons) > 1:
+            r["alternative_pairings"] = [
+                {
+                    "cigar": cigar_name,
+                    "strength": cigar_strength,
+                    "pour": bourbon["name"],
+                    "quality_tag": f"{bourbon['tier']} • {bourbon['price']}",
+                    "why": [
+                        bourbon["notes"],
+                        f"Proof: {bourbon['proof']} • Flavor: {bourbon['flavor_intensity']}"
+                    ]
+                }
+                for bourbon in bourbons[1:]
+            ]
+        
+        r["key_points"] = [
+            f"All bourbons match {cigar_name}'s {cigar_strength} profile",
+            "Budget to premium options",
+            "Sip bourbon, then draw on cigar"
+        ]
+        
+        r["next_step"] = "Pick your bourbon and enjoy the pairing!"
         
     # Case 3: General pairing request
     else:
