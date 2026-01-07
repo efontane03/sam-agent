@@ -24,17 +24,6 @@ from cigar_pairings import (
 from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 from bourbon_knowledge_dynamic import get_bourbon_info_dynamic, add_bourbon_to_dynamic_database, BOURBON_KNOWLEDGE_DYNAMIC
 
-# State-aware retail system for allocation hunting
-from state_retail_systems import (
-    get_state_retail_system,
-    format_hunt_response,
-    get_hunt_plan_template
-)
-from store_filters import (
-    filter_stores_by_state_system,
-    build_search_query
-)
-
 # Anthropic API for dynamic bourbon research
 try:
     from anthropic import Anthropic
@@ -171,24 +160,17 @@ def _provide_bourbon_research_guidance(bourbon_name: str) -> Dict[str, Any]:
     """Provide guidance on researching a bourbon not in our database."""
     return {
         "name": bourbon_name.title(),
-        "summary": f"I don't have {bourbon_name.title()} in my database yet, but I can guide you on what to look for!",
+        "summary": f"I couldn't find reliable information on {bourbon_name.title()}. Try BreakingBourbon.com or r/bourbon for reviews.",
         "research_tips": [
-            f"Search '{bourbon_name} bourbon review' for detailed tasting notes",
-            f"Check '{bourbon_name} distillery' to learn who makes it",
-            f"Look for '{bourbon_name} MSRP' to find retail pricing",
-            f"Try '{bourbon_name} proof ABV' for strength information"
-        ],
-        "trusted_sources": [
-            "BreakingBourbon.com - Professional reviews",
-            "BourbonCulture.com - Community ratings",
-            "Reddit r/bourbon - Real user experiences",
-            "Distiller.com - Comprehensive database"
+            f"• Search: '{bourbon_name} bourbon review'",
+            f"• Check trusted sources: BreakingBourbon.com - Professional reviews",
+            f"• Look for distillery, proof, age, and tasting notes"
         ],
         "what_to_look_for": [
             "Distillery and location",
             "Proof/ABV and age statement",
-            "Mashbill (corn, rye, wheat percentages)",
-            "Tasting notes and finish",
+            "Mashbill (corn, rye, wheat percentages)"
+        ],
             "Price range and availability"
         ]
     }
@@ -244,11 +226,39 @@ def _nominatim_geocode(q: str) -> Optional[Tuple[float, float, str]]:
     except Exception:
         return None
 
-def _google_places_liquor_stores(lat: float, lng: float, state: str = None, radius_m: int = 8000, limit: int = 8):
-    """Search for liquor stores using Google Places API with state-aware filtering."""
+def _google_places_liquor_stores(lat: float, lng: float, radius_m: int = 8000, limit: int = 8):
+    """Search for liquor stores using Google Places API with chain filtering."""
     if not _GOOGLE_API_KEY:
         print("WARNING: No Google Places API key")
         return []
+    
+    EXCLUDED_CHAINS = [
+        'cvs', 'walgreens', 'rite aid', 'target', 'walmart', 'costco',
+        '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
+        'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
+        'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b',
+        'food lion', 'giant', 'stop & shop', 'stop and shop',
+        'food store', 'grocery', 'market', 'deli', 'meat market',
+        'gas station', 'convenience', 'mini mart', 'smoke shop'
+    ]
+    
+    # BEER-ONLY EXCLUSIONS - Do NOT include beer-focused establishments
+    BEER_EXCLUSIONS = [
+        'beer garden', 'beergarden',
+        'brewery', 'brewing', 'brewpub', 'brew pub',
+        'taproom', 'tap room', 'tasting room',
+        'beer bar', 'beer junction', 'beer only',
+        'pub', 'tavern', 'alehouse', 'ale house'
+    ]
+    
+    # VALID LIQUOR STORE TERMS (including regional variations)
+    LIQUOR_STORE_INDICATORS = [
+        'liquor', 'spirits', 'wine & spirits', 'wine and spirits',
+        'package store', 'packie',
+        'abc store', 'state store',
+        'liquor outlet', 'liquor mart', 'liquor depot',
+        'spirit shop', 'beverage depot'
+    ]
     
     out = []
     try:
@@ -263,38 +273,69 @@ def _google_places_liquor_stores(lat: float, lng: float, state: str = None, radi
         total_results = len(data.get("results", []))
         print(f"DEBUG: Google Places returned {total_results} total results")
         
-        # Convert Google Places results to standard format for filtering
-        places = []
         for place in data.get("results", []):
             name = place.get("name", "Liquor Store")
+            name_lower = name.lower().strip()
+            
+            print(f"DEBUG: Checking place: {name}")
+            
+            # STEP 1: Check excluded chains
+            is_excluded = False
+            for chain in EXCLUDED_CHAINS:
+                if chain in name_lower:
+                    print(f"DEBUG: Skipping chain: {name}")
+                    is_excluded = True
+                    break
+            if is_excluded:
+                continue
+            
+            # STEP 2: EXCLUDE BEER-ONLY ESTABLISHMENTS
+            is_beer_only = False
+            for beer_term in BEER_EXCLUSIONS:
+                if beer_term in name_lower:
+                    print(f"DEBUG: Skipping beer establishment: {name}")
+                    is_beer_only = True
+                    break
+            if is_beer_only:
+                continue
+            
+            # STEP 3: Verify it's actually a liquor store (not just beer)
+            has_liquor_indicator = any(indicator in name_lower for indicator in LIQUOR_STORE_INDICATORS)
+            
+            # If name has "beer" but no liquor indicators, skip it
+            if 'beer' in name_lower and not has_liquor_indicator:
+                print(f"DEBUG: Skipping beer-focused store without liquor indicators: {name}")
+                continue
+            
+            # STEP 4: Additional name-based filtering for food stores, delis, markets
+            food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
+            if any(keyword in name_lower for keyword in food_keywords):
+                # Only keep if name ALSO has strong liquor indicators
+                if not has_liquor_indicator:
+                    print(f"DEBUG: Skipping food-focused store: {name}")
+                    continue
+            
             place_types = place.get("types", [])
-            address = place.get("vicinity", "")
+            
+            # STEP 5: Skip gas stations and convenience stores unless they're clearly liquor-focused
+            if "gas_station" in place_types or "convenience_store" in place_types:
+                if not has_liquor_indicator:
+                    print(f"DEBUG: Skipping convenience: {name}")
+                    continue
+            
+            # STEP 6: Skip grocery stores, delis, and food-focused places
+            if any(t in place_types for t in ["grocery_or_supermarket", "supermarket", "store"]):
+                # Only keep if they have "liquor_store" type AND liquor-related keywords in name
+                if "liquor_store" not in place_types or not has_liquor_indicator:
+                    print(f"DEBUG: Skipping grocery/food store: {name}")
+                    continue
+            
             place_lat = place.get("geometry", {}).get("location", {}).get("lat")
             place_lng = place.get("geometry", {}).get("location", {}).get("lng")
+            address = place.get("vicinity", "")
             
-            places.append({
-                "name": name,
-                "types": place_types,
-                "address": address,
-                "lat": place_lat,
-                "lng": place_lng,
-                "place_id": place.get("place_id")
-            })
-        
-        # Apply state-aware filtering if state is provided
-        if state and places:
-            print(f"DEBUG: Applying state-aware filtering for {state}")
-            filtered_places = filter_stores_by_state_system(places, state, debug=True)
-            print(f"DEBUG: After state filtering: {len(filtered_places)} stores")
-        else:
-            # Fallback to basic filtering if no state provided
-            print("DEBUG: No state provided, using basic filtering")
-            filtered_places = _basic_liquor_store_filter(places)
-        
-        # Convert filtered results to stops format with phone numbers
-        for place_dict in filtered_places[:limit]:
             phone = None
-            place_id = place_dict.get("place_id")
+            place_id = place.get("place_id")
             if place_id:
                 try:
                     details_params = {"place_id": place_id, "fields": "formatted_phone_number", "key": _GOOGLE_API_KEY}
@@ -309,100 +350,17 @@ def _google_places_liquor_stores(lat: float, lng: float, state: str = None, radi
             if phone:
                 notes = f"Call {phone}. Ask about allocation process."
             
-            place_lat = place_dict.get("lat")
-            place_lng = place_dict.get("lng")
-            
             if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
-                out.append(_stop(
-                    name=place_dict["name"],
-                    address=place_dict["address"],
-                    notes=notes,
-                    lat=float(place_lat),
-                    lng=float(place_lng)
-                ))
-                print(f"DEBUG: ✅ ADDED TO RESULTS: {place_dict['name']}")
+                out.append(_stop(name=name, address=address, notes=notes, lat=float(place_lat), lng=float(place_lng)))
+                print(f"DEBUG: ✅ KEPT: {name}")
             
+            if len(out) >= limit:
+                break
     except Exception as e:
         print(f"Google Places error: {type(e).__name__}: {e}")
     
-    print(f"DEBUG: Google Places final results: {len(out)} stores")
+    print(f"DEBUG: Google Places final results: {len(out)} stores passed all filters")
     return out
-
-
-def _basic_liquor_store_filter(places: List[Dict]) -> List[Dict]:
-    """Basic filtering when no state is provided - uses original logic."""
-    EXCLUDED_CHAINS = [
-        'cvs', 'walgreens', 'rite aid', 'target', 'walmart', 'costco',
-        '7-eleven', '7 eleven', 'circle k', 'shell', 'chevron', 'exxon',
-        'whole foods', 'wholefoods', 'trader joe', "trader joe's", 'traderjoe',
-        'kroger', 'safeway', 'albertsons', 'publix', 'heb', 'h-e-b',
-        'food lion', 'giant', 'stop & shop', 'stop and shop',
-        'food store', 'grocery', 'market', 'deli', 'meat market',
-        'gas station', 'convenience', 'mini mart', 'smoke shop'
-    ]
-    
-    BEER_EXCLUSIONS = [
-        'beer garden', 'beergarden',
-        'brewery', 'brewing', 'brewpub', 'brew pub',
-        'taproom', 'tap room', 'tasting room',
-        'beer bar', 'beer junction', 'beer only',
-        'pub', 'tavern', 'alehouse', 'ale house'
-    ]
-    
-    LIQUOR_STORE_INDICATORS = [
-        'liquor', 'spirits', 'wine & spirits', 'wine and spirits',
-        'package store', 'packie',
-        'abc store', 'state store',
-        'liquor outlet', 'liquor mart', 'liquor depot',
-        'spirit shop', 'beverage depot'
-    ]
-    
-    filtered = []
-    for place in places:
-        name = place.get("name", "")
-        name_lower = name.lower().strip()
-        place_types = place.get("types", [])
-        
-        # Check excluded chains
-        if any(chain in name_lower for chain in EXCLUDED_CHAINS):
-            print(f"DEBUG: Skipping chain: {name}")
-            continue
-        
-        # Exclude beer-only establishments
-        if any(beer_term in name_lower for beer_term in BEER_EXCLUSIONS):
-            print(f"DEBUG: Skipping beer establishment: {name}")
-            continue
-        
-        # Verify it's a liquor store
-        has_liquor_indicator = any(indicator in name_lower for indicator in LIQUOR_STORE_INDICATORS)
-        
-        if 'beer' in name_lower and not has_liquor_indicator:
-            print(f"DEBUG: Skipping beer-focused store: {name}")
-            continue
-        
-        # Skip food stores without liquor indicators
-        food_keywords = ['food store', 'food market', 'deli', 'meat market', 'butcher', 'grocery']
-        if any(keyword in name_lower for keyword in food_keywords):
-            if not has_liquor_indicator:
-                print(f"DEBUG: Skipping food store: {name}")
-                continue
-        
-        # Skip gas stations/convenience without liquor indicators
-        if "gas_station" in place_types or "convenience_store" in place_types:
-            if not has_liquor_indicator:
-                print(f"DEBUG: Skipping convenience: {name}")
-                continue
-        
-        # Skip grocery stores
-        if any(t in place_types for t in ["grocery_or_supermarket", "supermarket"]):
-            if "liquor_store" not in place_types or not has_liquor_indicator:
-                print(f"DEBUG: Skipping grocery: {name}")
-                continue
-        
-        filtered.append(place)
-        print(f"DEBUG: ✓ Including: {name}")
-    
-    return filtered
 
 def _convert_curated_to_stops(curated_stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Convert curated store format to stops format."""
@@ -466,16 +424,6 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
     
     print(f"DEBUG: Building stops for area_hint='{area_hint}'")
     
-    # Extract state from area_hint (e.g., "Seattle, WA" -> "WA")
-    state = None
-    if "," in hint:
-        parts = hint.split(",")
-        if len(parts) == 2:
-            state_part = parts[1].strip().upper()
-            if len(state_part) == 2:
-                state = state_part
-                print(f"DEBUG: Extracted state: {state}")
-    
     # Determine if this is a ZIP code or city name
     is_zip_code = bool(_extract_zip(hint))
     
@@ -507,8 +455,8 @@ def _build_hunt_stops(area_hint: str) -> Tuple[str, List[Dict[str, Any]]]:
         print(f"DEBUG: Geocoded '{hint}' to {lat}, {lng}")
         
         if _GOOGLE_API_KEY:
-            # Search with Google Places using appropriate radius and state-aware filtering
-            google_stops = _google_places_liquor_stores(lat, lng, state=state, radius_m=search_radius, limit=search_limit)
+            # Search with Google Places using appropriate radius
+            google_stops = _google_places_liquor_stores(lat, lng, radius_m=search_radius, limit=search_limit)
             if google_stops:
                 print(f"DEBUG: Found {len(google_stops)} stores via Google Places")
     
@@ -683,43 +631,35 @@ def _answer_general_knowledge(question: str) -> Optional[Dict[str, Any]]:
         return None
     
     try:
-        prompt = f"""You are Sam, a bourbon and cigar expert. Answer this question about bourbon, whiskey, or cigars:
+        prompt = f"""You are Sam, a bourbon and cigar enthusiast who loves talking shop. You're knowledgeable but laid-back - like chatting with a friend at a cigar lounge, not reading from a textbook.
 
-"{question}"
+User asked: "{question}"
+
+Conversational guidelines:
+- Talk naturally, like you're having a conversation over drinks
+- Use "I'd go with" instead of "I recommend"
+- Be enthusiastic but not over-the-top
+- Share insights casually, not robotically
+- Keep it 2-4 sentences unless user wants more detail
 
 Rules:
 1. ONLY answer questions about bourbon, whiskey, spirits, or cigars
-2. If the question is off-topic (weather, sports, politics, etc.), politely decline: "I'm your bourbon & cigar expert! Let's talk spirits and sticks. Ask me about bourbon, whiskey, or cigars!"
-3. For CIGAR RECOMMENDATIONS, follow this EXACT format (example):
-
-**Recommendation 1: Arturo Fuente Hemingway**
-• Price: $9-13
-• Wrapper: Cameroon
-• Flavor: Cedar, nuts, subtle pepper
-• Why: Perfectly balanced medium-bodied smoke
-
-**Recommendation 2: Padron 2000 Natural**
-• Price: $6-8
-• Wrapper: Nicaraguan Natural
-• Flavor: Earth, cocoa, leather
-• Why: Exceptional value with full flavor
-
-**Recommendation 3: Oliva Serie G**
-• Price: $4-6
-• Wrapper: Cameroon
-• Flavor: Mild cedar, cream, toast
-• Why: Budget-friendly daily smoke
-
-CRITICAL RULES:
-- Provide exactly 2-3 DIFFERENT cigars
-- Each must be a UNIQUE cigar (different name)
-- Start directly with **Recommendation 1:** (no intro text)
-- Do NOT repeat any cigar name
-- Do NOT add preamble like "here are my picks"
-
-4. For other questions: Keep answers concise (2-4 sentences)
-5. Be knowledgeable and friendly
-6. If you don't know, say so honestly
+2. If off-topic, say: "I'm your bourbon & cigar expert! Let's talk spirits and sticks."
+3. For CIGAR RECOMMENDATIONS, provide 2-3 DIFFERENT cigars in bullet format:
+   
+   **Recommendation 1: [Cigar Name]**
+   • Price: [price range]
+   • Wrapper: [wrapper type]
+   • Flavor: [flavor notes]
+   • Why: [reason to choose]
+   
+   **Recommendation 2: [Different Cigar Name]**
+   • Price: [price range]
+   • Wrapper: [wrapper type]
+   • Flavor: [flavor notes]
+   • Why: [reason to choose]
+   
+   Each recommendation MUST be different. NO intro text, start with **Recommendation 1:**
 
 Answer:"""
         
@@ -814,8 +754,29 @@ Answer:"""
         return None
 
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
-    """Handle bourbon information requests - uses database or Claude API research."""
+    """Handle bourbon/cigar information requests - uses database or Claude API research."""
     msg_lower = msg.lower()
+    
+    # Known cigar brands for context awareness
+    KNOWN_CIGAR_BRANDS = [
+        "rocky patel", "padron", "arturo fuente", "oliva", "cohiba", "montecristo",
+        "davidoff", "ashton", "my father", "liga privada", "drew estate", "macanudo",
+        "romeo y julieta", "partagas", "hoyo de monterrey", "punch", "cao", "acid"
+    ]
+    
+    # Check if this is about a cigar (not a bourbon)
+    is_cigar_query = False
+    mentioned_cigar_brand = None
+    for brand in KNOWN_CIGAR_BRANDS:
+        if brand in msg_lower:
+            is_cigar_query = True
+            mentioned_cigar_brand = brand
+            print(f"Detected cigar brand query: {brand}")
+            break
+    
+    # If it's about a cigar, use general knowledge mode (Claude API)
+    if is_cigar_query and ANTHROPIC_AVAILABLE:
+        return _answer_general_knowledge(msg)
     
     # Check if user is asking about a specific bourbon (not a general question)
     info_keywords = ["tell me about", "what is", "what's", "about", "info on", "explain", "describe"]
@@ -837,11 +798,13 @@ def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
             if session.last_bourbon_info:
                 context_info = f"Previous bourbon discussed: {session.last_bourbon_info.get('name', '')}"
             
-            prompt = f"""{context_info}
+            prompt = f"""You're Sam - a bourbon enthusiast chatting with a friend. Keep it casual and conversational.
 
-User's follow-up question: "{msg}"
+{context_info}
 
-Provide a concise, informative answer to their follow-up question about this bourbon. Keep it to 2-3 sentences."""
+User's follow-up: "{msg}"
+
+Answer naturally like you're having a conversation, not reading a textbook. Keep it to 2-3 sentences unless they want more detail."""
             
             response = ANTHROPIC_CLIENT.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -944,6 +907,13 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
     """Handle cigar and bourbon pairing requests."""
     msg_lower = msg.lower()
     
+    # Known cigar brands for context awareness
+    KNOWN_CIGAR_BRANDS = [
+        "rocky patel", "padron", "arturo fuente", "oliva", "cohiba", "montecristo",
+        "davidoff", "ashton", "my father", "liga privada", "drew estate", "macanudo",
+        "romeo y julieta", "partagas", "hoyo de monterrey", "punch", "cao", "acid"
+    ]
+    
     # Normalize common variations and apostrophes
     msg_normalized = (msg_lower
                      .replace("4 roses", "four roses")
@@ -1018,49 +988,61 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
                 found_bourbon = bourbon_info["name"].lower()
                 print(f"✅ Researched and added: {found_bourbon}")
     
-    found_cigar_strength = None
-    if "mild" in msg_lower or "light" in msg_lower:
-        found_cigar_strength = "mild"
-    elif "full" in msg_lower or "strong" in msg_lower or "bold" in msg_lower:
-        found_cigar_strength = "full"
-    elif "medium" in msg_lower:
-        found_cigar_strength = "medium"
+    # DETECT STRENGTH MODIFIERS - User might override bourbon's default strength
+    # "give me full flavored pairing with 4 roses" → user wants FULL cigars, not medium
+    requested_cigar_strength = None
+    if "full" in msg_lower or "full bodied" in msg_lower or "full flavored" in msg_lower or "strong" in msg_lower or "bold" in msg_lower:
+        requested_cigar_strength = "full"
+        print(f"User requested FULL-BODIED cigars (overriding bourbon's default strength)")
+    elif "mild" in msg_lower or "light" in msg_lower or "mild flavored" in msg_lower:
+        requested_cigar_strength = "mild"
+        print(f"User requested MILD cigars (overriding bourbon's default strength)")
+    elif "medium" in msg_lower or "medium bodied" in msg_lower:
+        requested_cigar_strength = "medium"
+        print(f"User requested MEDIUM cigars (overriding bourbon's default strength)")
     
     r = _blank_response("pairing")
     
     # Case 1: User mentioned a bourbon, recommend cigars (min 3)
     if found_bourbon:
-        pairing_data = get_pairing_for_bourbon(found_bourbon)
-        cigars = pairing_data['recommendations']
-        
-        r["summary"] = f"Perfect! For {found_bourbon.title()}, here are {len(cigars)} cigar recommendations across all price tiers."
+        # If user specified strength, use that; otherwise use bourbon's default strength
+        if requested_cigar_strength:
+            from cigar_pairings import get_cigars_by_strength
+            pairing_data = get_cigars_by_strength(requested_cigar_strength)
+            cigars = pairing_data['recommendations']
+            r["summary"] = f"Nice! For {found_bourbon.title()} with {requested_cigar_strength}-bodied cigars - here's what I'd go with:"
+        else:
+            pairing_data = get_pairing_for_bourbon(found_bourbon)
+            cigars = pairing_data['recommendations']
+            r["summary"] = f"Ah, {found_bourbon.title()}! Here are my top picks:"
         
         # Primary pairing (first recommendation)
         if cigars:
-            primary = cigars[0]
+            primary = cigars[0] if isinstance(cigars[0], dict) and 'name' in cigars[0] else {'name': cigars[0]['name'] if 'name' in str(cigars[0]) else 'Cigar', 'strength': 'medium', 'tier': 'budget', 'price': '$5-10', 'notes': 'Great pairing', 'wrapper': 'Natural'}
             r["primary_pairing"] = {
-                "cigar": primary["name"],
-                "strength": primary["strength"],
+                "cigar": primary.get("name", "Cigar"),
+                "strength": primary.get("strength", "medium"),
                 "pour": found_bourbon.title(),
-                "quality_tag": f"{primary['tier']} • {primary['price']}",
-                "why": [primary["notes"], f"Wrapper: {primary['wrapper']}"]
+                "quality_tag": f"{primary.get('tier', 'budget')} • {primary.get('price', '$5-10')}",
+                "why": [primary.get("notes", "Great pairing"), f"Wrapper: {primary.get('wrapper', 'Natural')}"]
             }
         
         # Alternative pairings (remaining recommendations)
         if len(cigars) > 1:
             r["alternative_pairings"] = [
                 {
-                    "cigar": cigar["name"],
-                    "strength": cigar["strength"],
+                    "cigar": cigar.get("name", "Cigar"),
+                    "strength": cigar.get("strength", "medium"),
                     "pour": found_bourbon.title(),
-                    "quality_tag": f"{cigar['tier']} • {cigar['price']}",
-                    "why": [cigar["notes"], f"Wrapper: {cigar['wrapper']}"]
+                    "quality_tag": f"{cigar.get('tier', 'budget')} • {cigar.get('price', '$5-10')}",
+                    "why": [cigar.get("notes", "Great pairing"), f"Wrapper: {cigar.get('wrapper', 'Natural')}"]
                 }
                 for cigar in cigars[1:]
             ]
         
+        strength_note = f"{requested_cigar_strength}-bodied" if requested_cigar_strength else pairing_data.get('bourbon_strength', 'balanced')
         r["key_points"] = [
-            f"All cigars match {pairing_data['bourbon_strength']} bourbon strength",
+            f"All cigars match {strength_note} profile",
             "Price range from budget to premium options",
             "Sip bourbon neat or with one large ice cube"
         ]
@@ -1077,22 +1059,27 @@ def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
         if unknown_bourbon and ANTHROPIC_AVAILABLE:
             print(f"Using Claude API to find pairing for unknown bourbon: {unknown_bourbon}")
             try:
-                prompt = f"""Recommend 3-5 cigars that pair well with {unknown_bourbon} bourbon.
+                prompt = f"""You're Sam, chatting with a friend who wants cigar pairings for {unknown_bourbon}.
 
-For each cigar, provide:
-- Name
-- Price range
-- Strength (mild/medium/full)
-- Brief tasting notes
-- Why it pairs well with this bourbon
+Be conversational and enthusiastic - like recommending cigars to a buddy at the lounge, not filling out a form.
 
-Format each as:
-Cigar: [name]
-Price: [range]
-Strength: [strength]
-Notes: [notes]
-Pairing: [why it works]
----"""
+Recommend 3-5 cigars using this format:
+
+**Recommendation 1: [Cigar Name]**
+• Price: [price range]
+• Wrapper: [wrapper type]
+• Flavor: [flavor notes]
+• Why: [why it pairs - be casual, not technical]
+
+**Recommendation 2: [Different Cigar Name]**
+• Price: [price range]
+• Wrapper: [wrapper type]
+• Flavor: [flavor notes]
+• Why: [why it pairs - conversational tone]
+
+Keep the "Why" section friendly and natural - avoid phrases like "The notes complement" and instead say things like "plays beautifully with" or "brings out the..."
+
+CRITICAL: Each must be DIFFERENT cigars. Start with **Recommendation 1:** - no intro text."""
                 
                 response = ANTHROPIC_CLIENT.messages.create(
                     model="claude-sonnet-4-20250514",
@@ -1102,9 +1089,9 @@ Pairing: [why it works]
                 
                 content = response.content[0].text.strip()
                 
-                r["summary"] = f"Great choice! Here are cigar pairings for {unknown_bourbon.title()}:"
+                r["summary"] = f"Nice! Here's what I'd pair with {unknown_bourbon.title()}:"
                 r["key_points"] = [content]
-                r["next_step"] = "These recommendations are based on the bourbon's flavor profile."
+                r["next_step"] = "Pick your price point and enjoy!"
                 
                 return r
                 
@@ -1209,7 +1196,7 @@ def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
     return r
 
 def _hunt_plan(session: SamSession) -> Dict[str, Any]:
-    """Generate allocation store hunt plan for a location with state-aware guidance."""
+    """Generate allocation store hunt plan for a location."""
     r = _blank_response("hunt")
     area = session.hunt_area or "your area"
     
@@ -1218,29 +1205,6 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
     
     if resolved_area:
         area = resolved_area
-    
-    # Extract state for state-specific guidance
-    state = None
-    if "," in area:
-        parts = area.split(",")
-        if len(parts) == 2:
-            state_part = parts[1].strip().upper()
-            if len(state_part) == 2:
-                state = state_part
-    
-    # Get state-specific retail system info
-    state_guidance = None
-    if state:
-        try:
-            system_type, config = get_state_retail_system(state)
-            state_guidance = {
-                "system_type": system_type,
-                "name": config["name"],
-                "strategy": config["allocation_tip"]
-            }
-            print(f"DEBUG: State retail system for {state}: {system_type}")
-        except Exception as e:
-            print(f"DEBUG: Could not get state guidance: {e}")
     
     # Check if we have curated stores with allocation indicators
     has_curated = any(
@@ -1262,20 +1226,11 @@ def _hunt_plan(session: SamSession) -> Dict[str, Any]:
         ]
     else:
         r["summary"] = f"Allocation stores in {area}."
-        
-        # Use state-specific guidance if available
-        if state_guidance:
-            r["key_points"] = [
-                f"🗺️ {state} Market: {state_guidance['name']}",
-                f"💡 Strategy: {state_guidance['strategy']}",
-                "📞 Call shops to learn their specific allocation process"
-            ]
-        else:
-            r["key_points"] = [
-                "Call 3-5 shops and ask about their allocation process",
-                "Ask: When do you get allocated bottles? How does your raffle/list work?",
-                "Show up on delivery days (usually Thu/Fri) for best chances"
-            ]
+        r["key_points"] = [
+            "Call 3-5 shops and ask about their allocation process",
+            "Ask: When do you get allocated bottles? How does your raffle/list work?",
+            "Show up on delivery days (usually Thu/Fri) for best chances"
+        ]
     
     if stops:
         r["stops"] = stops

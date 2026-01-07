@@ -428,3 +428,46 @@ def get_pairing_for_bourbon(bourbon_name: str):
         "bourbon_strength": bourbon_strength,
         "recommendations": unique_matches[:5]  # Max 5 to keep response manageable
     }
+
+def get_cigars_by_strength(requested_strength: str):
+    """Get cigar recommendations for a specific strength level. Returns minimum 3 cigars across price tiers."""
+    strength_lower = requested_strength.lower()
+    
+    # Collect matching cigars from all tiers
+    all_matches = []
+    
+    for tier_name, cigars in CIGAR_RECOMMENDATIONS.items():
+        for cigar in cigars:
+            cigar_strength_lower = cigar["strength"].lower()
+            
+            # Match by strength
+            if "mild" in strength_lower and "mild" in cigar_strength_lower:
+                all_matches.append(cigar)
+            elif "full" in strength_lower and "full" in cigar_strength_lower:
+                all_matches.append(cigar)
+            elif "medium" in strength_lower and "medium" in cigar_strength_lower:
+                all_matches.append(cigar)
+    
+    # Ensure we have at least 3 recommendations
+    if len(all_matches) < 3:
+        # Add general recommendations based on strength
+        if "mild" in strength_lower:
+            all_matches.extend(CIGAR_RECOMMENDATIONS["budget"][:3])
+        elif "full" in strength_lower:
+            all_matches.extend(CIGAR_RECOMMENDATIONS["premium"][:3])
+        else:
+            all_matches.extend(CIGAR_RECOMMENDATIONS["mid_range"][:3])
+    
+    # Remove duplicates
+    seen = set()
+    unique_matches = []
+    for cigar in all_matches:
+        if cigar["name"] not in seen:
+            seen.add(cigar["name"])
+            unique_matches.append(cigar)
+    
+    # Return at least 3, up to 5
+    return {
+        "requested_strength": requested_strength,
+        "recommendations": unique_matches[:5]  # Max 5 to keep response manageable
+    }
