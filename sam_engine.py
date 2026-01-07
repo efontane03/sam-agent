@@ -24,6 +24,14 @@ from cigar_pairings import (
 from bourbon_knowledge import get_bourbon_info, BOURBON_KNOWLEDGE
 from bourbon_knowledge_dynamic import get_bourbon_info_dynamic, add_bourbon_to_dynamic_database, BOURBON_KNOWLEDGE_DYNAMIC
 
+# User learning system
+try:
+    from user_profiles import UserProfile, detect_preferences_from_message
+    USER_PROFILES_AVAILABLE = True
+except:
+    USER_PROFILES_AVAILABLE = False
+    print("WARNING: User profiles not available - learning features disabled")
+
 # Anthropic API for dynamic bourbon research
 try:
     from anthropic import Anthropic
@@ -512,12 +520,21 @@ class SamSession:
     last_cigar_discussed: Optional[str] = None
     last_cigar_info: Optional[Dict[str, Any]] = None
     conversation_history: List[str] = field(default_factory=list)
+    # User learning
+    user_profile: Optional[Any] = None  # UserProfile instance
     
     def __post_init__(self):
         if self.context is None or not isinstance(self.context, dict):
             self.context = {}
         if self.conversation_history is None:
             self.conversation_history = []
+        # Initialize user profile
+        if USER_PROFILES_AVAILABLE and self.user_profile is None:
+            try:
+                self.user_profile = UserProfile(self.user_id)
+            except Exception as e:
+                print(f"Could not initialize user profile: {e}")
+                self.user_profile = None
 
 _RE_ZIP = re.compile(r"\b\d{5}\b")
 
@@ -603,6 +620,15 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
             if isinstance(loc_hint, str) and loc_hint.strip():
                 session.hunt_area = session.hunt_area or loc_hint.strip()
         
+        # Auto-detect and store preferences from message
+        if session.user_profile and USER_PROFILES_AVAILABLE:
+            try:
+                detected_prefs = detect_preferences_from_message(msg)
+                for pref_type, value in detected_prefs.items():
+                    session.user_profile.update_preference(pref_type, value)
+            except Exception as e:
+                print(f"Could not update preferences: {e}")
+        
         mode: SamMode = _infer_mode(msg, session)
         
         if mode == "hunt":
@@ -611,6 +637,17 @@ def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
             resp = _handle_pairing(msg, session)
         else:
             resp = _handle_info(msg, session)
+        
+        # Log interaction for learning
+        if session.user_profile and USER_PROFILES_AVAILABLE:
+            try:
+                session.user_profile.log_interaction(
+                    bourbon=session.last_bourbon_discussed,
+                    cigar=session.last_cigar_discussed,
+                    interaction_type=mode
+                )
+            except Exception as e:
+                print(f"Could not log interaction: {e}")
         
         actual_mode = resp.get("mode") if isinstance(resp, dict) else mode
         session.last_mode = actual_mode
@@ -773,6 +810,22 @@ Answer:"""
 def _handle_info(msg: str, session: SamSession) -> Dict[str, Any]:
     """Handle bourbon/cigar information requests - uses database or Claude API research."""
     msg_lower = msg.lower()
+    
+    # Check for greeting/hello
+    greeting_keywords = ["hello", "hi", "hey", "howdy", "sup", "what's up"]
+    is_greeting = any(keyword in msg_lower for keyword in greeting_keywords) and len(msg.split()) <= 3
+    
+    if is_greeting and session.user_profile and USER_PROFILES_AVAILABLE:
+        try:
+            personalized_greeting = session.user_profile.get_personalized_greeting()
+            if personalized_greeting:
+                r = _blank_response("info")
+                r["summary"] = personalized_greeting
+                r["key_points"] = ["What can I help you with today?"]
+                r["next_step"] = "Ask me about bourbon, whiskey, cigars, or pairings!"
+                return r
+        except Exception as e:
+            print(f"Could not get personalized greeting: {e}")
     
     # Known cigar brands for context awareness
     KNOWN_CIGAR_BRANDS = [
