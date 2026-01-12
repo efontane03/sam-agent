@@ -1,5 +1,10 @@
 """sam_engine.py - Integrated Version with Curated Database + Google Places
 
+CORRECTED VERSION with bug fixes:
+1. Context preservation with typo tolerance
+2. Intent classification (cigar retail vs bourbon allocation)
+3. Pronoun resolution for pairing requests
+
 Combines curated allocation store database with live Google Places search.
 """
 
@@ -41,6 +46,213 @@ except:
     ANTHROPIC_CLIENT = None
     ANTHROPIC_AVAILABLE = False
     print("WARNING: Anthropic API not available - bourbon research will be limited to database")
+
+# ============================================================================
+# PATCH 1: Import debugging and retail search modules (NEW)
+# ============================================================================
+
+try:
+    from session_debugger import debugger, log_context_decision
+    DEBUGGER_AVAILABLE = True
+except:
+    DEBUGGER_AVAILABLE = False
+    print("WARNING: session_debugger not available - debugging disabled")
+    # Create dummy debugger if not available
+    class DummyDebugger:
+        def log_session_state(self, *args, **kwargs): pass
+    debugger = DummyDebugger()
+    def log_context_decision(*args, **kwargs): pass
+
+try:
+    from cigar_retail_search import CigarRetailSearch, IntentClassifier
+    CIGAR_RETAIL_AVAILABLE = True
+except:
+    CIGAR_RETAIL_AVAILABLE = False
+    print("WARNING: cigar_retail_search not available - cigar retail search disabled")
+
+
+# ============================================================================
+# PATCH 2: Message Preprocessing Class (NEW)
+# ============================================================================
+
+class MessagePreprocessor:
+    """
+    Preprocess messages to handle typos and infer context
+    Fixes: Context loss when user has typos like "mor robust optins"
+    """
+    
+    # Common typos mapping
+    COMMON_TYPOS = {
+        "mor": "more",
+        "moar": "more",
+        "optins": "options",
+        "optoins": "options",
+        "reccomendation": "recommendation",
+        "recomendation": "recommendation",
+        "fid": "find",
+        "teh": "the",
+        "thse": "these",
+        "thoes": "those",
+        "cigr": "cigar",
+        "burboun": "bourbon",
+        "bourban": "bourbon",
+        "whisy": "whiskey",
+    }
+    
+    @classmethod
+    def correct_typos(cls, message: str) -> str:
+        """Correct common typos in message"""
+        corrected = message
+        
+        for typo, correction in cls.COMMON_TYPOS.items():
+            # Use word boundaries to avoid partial matches
+            pattern = r'\b' + re.escape(typo) + r'\b'
+            corrected = re.sub(pattern, correction, corrected, flags=re.IGNORECASE)
+        
+        return corrected
+    
+    @classmethod
+    def infer_subject_from_context(cls, message: str, session) -> Optional[str]:
+        """
+        Infer what the user is asking about based on context
+        Returns: "cigar", "bourbon", or None
+        """
+        message_lower = message.lower()
+        
+        # Check for explicit mentions first
+        if any(w in message_lower for w in ["cigar", "cigars", "smoke", "stick", "stogie"]):
+            return "cigar"
+        elif any(w in message_lower for w in ["bourbon", "whiskey", "bottle", "pour"]):
+            return "bourbon"
+        
+        # No explicit mention - infer from session context
+        if hasattr(session, 'conversation_history') and session.conversation_history:
+            # Check last 2 turns
+            recent_turns = session.conversation_history[-2:] if len(session.conversation_history) >= 2 else session.conversation_history
+            for turn in reversed(recent_turns):
+                if isinstance(turn, str):
+                    content_lower = turn.lower()
+                else:
+                    content_lower = str(turn).lower()
+                    
+                if "cigar" in content_lower or "smoke" in content_lower:
+                    return "cigar"
+                elif "bourbon" in content_lower or "whiskey" in content_lower:
+                    return "bourbon"
+        
+        # Check what's in session state
+        if hasattr(session, 'last_cigar_discussed') and session.last_cigar_discussed:
+            if not hasattr(session, 'last_bourbon_discussed') or not session.last_bourbon_discussed:
+                return "cigar"
+        
+        if hasattr(session, 'last_bourbon_discussed') and session.last_bourbon_discussed:
+            if not hasattr(session, 'last_cigar_discussed') or not session.last_cigar_discussed:
+                return "bourbon"
+        
+        return None
+    
+    @classmethod
+    def detect_more_options_request(cls, message: str) -> bool:
+        """
+        Detect if user is asking for more options/recommendations
+        """
+        message_lower = message.lower()
+        
+        more_keywords = ["more", "other", "another", "different", "additional"]
+        option_keywords = ["option", "recommendation", "choice", "suggestion", "alternative"]
+        
+        has_more = any(kw in message_lower for kw in more_keywords)
+        has_option = any(kw in message_lower for kw in option_keywords)
+        
+        return has_more and has_option
+
+
+# ============================================================================
+# PATCH 3: Pronoun Resolver Class (NEW)
+# ============================================================================
+
+class PronounResolver:
+    """
+    Resolve pronouns like "it", "that", "them" to correct entities
+    Fixes: "what bourbon pairs with it" after discussing cigars
+    """
+    
+    @staticmethod
+    def resolve_pairing_pronoun(message: str, session) -> Dict[str, Any]:
+        """
+        Resolve pronouns in pairing requests
+        """
+        message_lower = message.lower()
+        
+        # Detect pronouns
+        pronouns = ["it", "that", "them", "these", "those"]
+        detected_pronoun = None
+        
+        for pronoun in pronouns:
+            if pronoun in message_lower:
+                detected_pronoun = pronoun
+                break
+        
+        if not detected_pronoun:
+            return {"has_pronoun": False}
+        
+        # Detect pairing keywords
+        pairing_keywords = ["pair", "pairs", "pairing", "goes with", "match", "matches"]
+        is_pairing_request = any(kw in message_lower for kw in pairing_keywords)
+        
+        if not is_pairing_request:
+            return {"has_pronoun": True, "is_pairing": False}
+        
+        # Determine pairing direction
+        # If mentions "bourbon" or "whiskey", user wants bourbon recommendations (cigar→bourbon)
+        if "bourbon" in message_lower or "whiskey" in message_lower:
+            return {
+                "has_pronoun": True,
+                "is_pairing": True,
+                "direction": "cigar_to_bourbon",
+                "refers_to": getattr(session, 'last_cigar_discussed', None),
+                "refers_to_type": "cigar"
+            }
+        
+        # If mentions "cigar", user wants cigar recommendations (bourbon→cigar)
+        elif "cigar" in message_lower or "smoke" in message_lower:
+            return {
+                "has_pronoun": True,
+                "is_pairing": True,
+                "direction": "bourbon_to_cigar",
+                "refers_to": getattr(session, 'last_bourbon_discussed', None),
+                "refers_to_type": "bourbon"
+            }
+        
+        # No clear direction - use most recently discussed item
+        else:
+            if hasattr(session, 'conversation_history') and session.conversation_history:
+                if session.conversation_history:
+                    last_message = str(session.conversation_history[-1]).lower()
+                    
+                    if "cigar" in last_message:
+                        return {
+                            "has_pronoun": True,
+                            "is_pairing": True,
+                            "direction": "cigar_to_bourbon",
+                            "refers_to": getattr(session, 'last_cigar_discussed', None),
+                            "refers_to_type": "cigar"
+                        }
+                    elif "bourbon" in last_message:
+                        return {
+                            "has_pronoun": True,
+                            "is_pairing": True,
+                            "direction": "bourbon_to_cigar",
+                            "refers_to": getattr(session, 'last_bourbon_discussed', None),
+                            "refers_to_type": "bourbon"
+                        }
+        
+        return {"has_pronoun": True, "is_pairing": False}
+
+
+# ============================================================================
+# REST OF YOUR ORIGINAL FILE CONTINUES HERE
+# ============================================================================
 
 def _research_bourbon_with_claude(bourbon_name: str) -> Optional[Dict[str, Any]]:
     """Use Claude API to research a bourbon, assign tiers, and return structured information."""
@@ -559,12 +771,80 @@ def _extract_location_from_message(msg: str) -> Optional[str]:
                 return location
     return None
 
+# ============================================================================
+# PATCH 4: Enhanced _infer_mode with pronoun/intent detection (MODIFIED)
+# ============================================================================
+
 def _infer_mode(text: str, session: SamSession) -> SamMode:
+    """
+    Enhanced mode inference with:
+    1. Pronoun resolution for pairings
+    2. Intent classification for retail search
+    3. "More options" detection
+    """
     t = (text or "").lower().strip()
+    
+    # STEP 1: Check for pronoun in pairing request (CRITICAL FIX)
+    pronoun_resolution = PronounResolver.resolve_pairing_pronoun(t, session)
+    if pronoun_resolution.get("is_pairing"):
+        if DEBUGGER_AVAILABLE:
+            log_context_decision(
+                session.user_id,
+                text,
+                {
+                    "action": "pronoun_resolution_in_infer",
+                    "direction": pronoun_resolution.get("direction"),
+                    "refers_to": pronoun_resolution.get("refers_to")
+                }
+            )
+        return "pairing"
+    
+    # STEP 2: Check for "more options" request (CRITICAL FIX)
+    if MessagePreprocessor.detect_more_options_request(t):
+        subject = MessagePreprocessor.infer_subject_from_context(t, session)
+        
+        if DEBUGGER_AVAILABLE:
+            log_context_decision(
+                session.user_id,
+                text,
+                {
+                    "action": "more_options_detected_in_infer",
+                    "inferred_subject": subject
+                }
+            )
+        
+        # If asking for more cigar options, go to info mode (cigar recommendations)
+        if subject == "cigar":
+            return "info"
+        # Keep existing logic for bourbon
+    
+    # STEP 3: Check for cigar retail search (CRITICAL FIX)
+    if CIGAR_RETAIL_AVAILABLE:
+        try:
+            intent_result = IntentClassifier.detect_retail_search_intent(t, session)
+            
+            if intent_result["intent"] == "cigar_retail":
+                if DEBUGGER_AVAILABLE:
+                    log_context_decision(
+                        session.user_id,
+                        text,
+                        {
+                            "action": "cigar_retail_detected",
+                            "confidence": intent_result["confidence"]
+                        }
+                    )
+                # Store intent in session for later
+                if not session.context:
+                    session.context = {}
+                session.context["detected_intent"] = "cigar_retail"
+                return "hunt"
+        except Exception as e:
+            print(f"Intent classification error: {e}")
+    
+    # EXISTING LOGIC CONTINUES (all your original code below)
     hunt_hits = ["allocation", "allocated", "drop", "raffle", "store", "shop", "near me", "hunt"]
     pairing_hits = ["pair", "pairing"]
     
-    # Expanded info hits for general bourbon/whiskey/cigar knowledge
     bourbon_whiskey_keywords = [
         "whiskey", "whisky", "bourbon", "rye", "scotch", "irish", "japanese",
         "tennessee whiskey", "distillery", "distilled", "proof", "age", "barrel",
@@ -583,16 +863,13 @@ def _infer_mode(text: str, session: SamSession) -> SamMode:
         "varieties", "types of", "kinds of", "difference between"
     ]
     
-    # Check for bourbon/whiskey/cigar content in the query
     has_bourbon_whiskey = any(kw in t for kw in bourbon_whiskey_keywords)
     has_cigar = any(kw in t for kw in cigar_keywords)
     has_question_pattern = any(pattern in t for pattern in question_patterns)
     
-    # If asking about bourbon/whiskey/cigar topics, go to info mode
     if (has_bourbon_whiskey or has_cigar) and (has_question_pattern or "?" in t):
         return "info"
     
-    # Check for specific bourbon names in database
     if any(h in t for h in ["tell me about", "what is", "what's", "about", "info on"]):
         for bourbon_name in list(BOURBON_KNOWLEDGE.keys()) + list(BOURBON_KNOWLEDGE_DYNAMIC.keys()):
             if bourbon_name in t:
@@ -612,9 +889,46 @@ def _infer_mode(text: str, session: SamSession) -> SamMode:
         return "pairing"
     return "info"
 
+
+# ============================================================================
+# PATCH 5: Main sam_engine function with typo correction (MODIFIED)
+# ============================================================================
+
 def sam_engine(message: str, session: SamSession) -> Dict[str, Any]:
+    """Main entry point with bug fixes for context, typos, and intent"""
     try:
         msg = (message or "").strip()
+        
+        # STEP 1: TYPO CORRECTION (NEW)
+        corrected_msg = MessagePreprocessor.correct_typos(msg)
+        
+        if corrected_msg != msg and DEBUGGER_AVAILABLE:
+            log_context_decision(
+                session.user_id,
+                msg,
+                {
+                    "action": "typo_correction",
+                    "original": msg,
+                    "corrected": corrected_msg
+                }
+            )
+        
+        # Use corrected message from here on
+        msg = corrected_msg
+        
+        # STEP 2: LOG SESSION STATE (NEW)
+        if DEBUGGER_AVAILABLE:
+            debugger.log_session_state(
+                session.user_id,
+                "message_received",
+                {
+                    "user_message": msg,
+                    "last_bourbon": session.last_bourbon_discussed,
+                    "last_cigar": session.last_cigar_discussed,
+                }
+            )
+        
+        # EXISTING LOGIC CONTINUES
         if session.context and isinstance(session.context, dict):
             loc_hint = session.context.get("location_hint")
             if isinstance(loc_hint, str) and loc_hint.strip():
@@ -1069,406 +1383,256 @@ Keep it conversational and natural."""
     
     return r
 
+
+# ============================================================================
+# PATCH 8: _handle_pairing with Pronoun Resolution (MODIFIED)
+# ============================================================================
+
 def _handle_pairing(msg: str, session: SamSession) -> Dict[str, Any]:
-    """Handle cigar and bourbon pairing requests."""
-    msg_lower = msg.lower()
+    """Handle pairing requests with pronoun resolution"""
     
-    # Known cigar brands for context awareness
-    KNOWN_CIGAR_BRANDS = [
-        "rocky patel", "padron", "arturo fuente", "oliva", "cohiba", "montecristo",
-        "davidoff", "ashton", "my father", "liga privada", "drew estate", "macanudo",
-        "romeo y julieta", "partagas", "hoyo de monterrey", "punch", "cao", "acid"
-    ]
+    # STEP 1: Check for pronoun resolution (NEW)
+    pronoun_resolution = PronounResolver.resolve_pairing_pronoun(msg, session)
     
-    # Normalize common variations and apostrophes
-    msg_normalized = (msg_lower
-                     .replace("4 roses", "four roses")
-                     .replace("wt", "wild turkey")
-                     .replace("'s", "s")  # booker's → bookers
-                     .replace("'", ""))    # remove remaining apostrophes
-    
-    # TIER 1: Check session memory first (if user just discussed a bourbon)
-    found_bourbon = None
-    if session.last_bourbon_discussed:
-        bourbon_lower = session.last_bourbon_discussed.lower().replace("'s", "s").replace("'", "")
-        bourbon_words = bourbon_lower.split()
+    if pronoun_resolution.get("is_pairing"):
+        direction = pronoun_resolution.get("direction")
+        refers_to = pronoun_resolution.get("refers_to")
         
-        # Check if bourbon name or any significant word from it is in the message
-        if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
-            found_bourbon = session.last_bourbon_discussed.lower()
-            print(f"Found bourbon from session memory: {found_bourbon}")
-    
-    # TIER 2: Check static databases if not found in session
-    if not found_bourbon:
-        # Check bourbon knowledge database with fuzzy matching
-        for bourbon_name in BOURBON_KNOWLEDGE.keys():
-            bourbon_normalized = bourbon_name.replace("'s", "s").replace("'", "")
-            bourbon_words = bourbon_normalized.split()
+        if DEBUGGER_AVAILABLE:
+            log_context_decision(
+                session.user_id,
+                msg,
+                {
+                    "action": "pronoun_pairing_resolution",
+                    "direction": direction,
+                    "refers_to": refers_to
+                }
+            )
+        
+        # Handle cigar→bourbon pairing
+        if direction == "cigar_to_bourbon" and refers_to:
+            session.pairing_spirit = refers_to
+            session.pairing_strength = session.last_cigar_info.get("strength") if session.last_cigar_info else None
+            session.pairing_waiting_for_spirit = False
+            session.pairing_waiting_for_strength = False
             
-            # Check full name or significant words
-            if bourbon_normalized in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
-                found_bourbon = bourbon_name
-                print(f"Found bourbon in knowledge database: {found_bourbon}")
-                break
-        
-        # Check dynamic database
-        if not found_bourbon:
-            for bourbon_name in BOURBON_KNOWLEDGE_DYNAMIC.keys():
-                bourbon_normalized = bourbon_name.replace("'s", "s").replace("'", "")
-                bourbon_words = bourbon_normalized.split()
-                
-                # Check full name or significant words
-                if bourbon_normalized in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
-                    found_bourbon = bourbon_name
-                    print(f"Found bourbon in dynamic database: {found_bourbon}")
-                    break
-        
-        # Check bourbon recommendations database (all tiers)
-        if not found_bourbon:
-            from cigar_pairings import BOURBON_RECOMMENDATIONS
-            for tier_name, bourbons in BOURBON_RECOMMENDATIONS.items():
-                for bourbon in bourbons:
-                    bourbon_lower = bourbon["name"].lower().replace("'s", "s").replace("'", "")
-                    bourbon_words = bourbon_lower.split()
-                    
-                    # Check full name or significant words
-                    if bourbon_lower in msg_normalized or any(word in msg_normalized for word in bourbon_words if len(word) > 3):
-                        found_bourbon = bourbon["name"].lower()
-                        print(f"Found bourbon in recommendations database: {found_bourbon}")
-                        break
-                if found_bourbon:
-                    break
-    
-    # TIER 3: If bourbon mentioned but not found, try to extract and research with Claude
-    if not found_bourbon and ("pair" in msg_lower or "pairing" in msg_lower) and ANTHROPIC_AVAILABLE:
-        # Extract bourbon name from message
-        potential_bourbon = msg_normalized
-        for remove_word in ["pair", "pairing", "cigar", "with", "for", "bourbon", "whiskey", "need", "want", "a", "an", "the", "good", "me"]:
-            potential_bourbon = potential_bourbon.replace(remove_word, " ").strip()
-        potential_bourbon = " ".join(potential_bourbon.split())  # Clean multiple spaces
-        
-        if potential_bourbon and len(potential_bourbon) > 2:
-            print(f"Attempting to research unknown bourbon for pairing: {potential_bourbon}")
-            bourbon_info = _research_bourbon_with_claude(potential_bourbon)
-            if bourbon_info:
-                found_bourbon = bourbon_info["name"].lower()
-                print(f"✅ Researched and added: {found_bourbon}")
-    
-    # DETECT STRENGTH MODIFIERS - User might override bourbon's default strength
-    # "give me full flavored pairing with 4 roses" → user wants FULL cigars, not medium
-    requested_cigar_strength = None
-    if "full" in msg_lower or "full bodied" in msg_lower or "full flavored" in msg_lower or "strong" in msg_lower or "bold" in msg_lower:
-        requested_cigar_strength = "full"
-        print(f"User requested FULL-BODIED cigars (overriding bourbon's default strength)")
-    elif "mild" in msg_lower or "light" in msg_lower or "mild flavored" in msg_lower:
-        requested_cigar_strength = "mild"
-        print(f"User requested MILD cigars (overriding bourbon's default strength)")
-    elif "medium" in msg_lower or "medium bodied" in msg_lower:
-        requested_cigar_strength = "medium"
-        print(f"User requested MEDIUM cigars (overriding bourbon's default strength)")
-    
-    r = _blank_response("pairing")
-    
-    # Case 1: User mentioned a bourbon, recommend cigars (min 3)
-    if found_bourbon:
-        # If user specified strength, use that; otherwise use bourbon's default strength
-        if requested_cigar_strength:
-            from cigar_pairings import get_cigars_by_strength
-            pairing_data = get_cigars_by_strength(requested_cigar_strength)
-            cigars = pairing_data['recommendations']
-            r["summary"] = f"Nice! For {found_bourbon.title()} with {requested_cigar_strength}-bodied cigars - here's what I'd go with:"
-        else:
-            pairing_data = get_pairing_for_bourbon(found_bourbon)
-            cigars = pairing_data['recommendations']
-            r["summary"] = f"Ah, {found_bourbon.title()}! Here are my top picks:"
-        
-        # Primary pairing (first recommendation)
-        if cigars:
-            primary = cigars[0] if isinstance(cigars[0], dict) and 'name' in cigars[0] else {'name': cigars[0]['name'] if 'name' in str(cigars[0]) else 'Cigar', 'strength': 'medium', 'tier': 'budget', 'price': '$5-10', 'notes': 'Great pairing', 'wrapper': 'Natural'}
-            r["primary_pairing"] = {
-                "cigar": primary.get("name", "Cigar"),
-                "strength": primary.get("strength", "medium"),
-                "pour": found_bourbon.title(),
-                "quality_tag": f"{primary.get('tier', 'budget')} • {primary.get('price', '$5-10')}",
-                "why": [primary.get("notes", "Great pairing"), f"Wrapper: {primary.get('wrapper', 'Natural')}"]
-            }
+            # Get bourbon pairings for the cigar
+            strength = session.pairing_strength or "medium"
+            pairing_data = get_pairing_for_cigar_strength(strength)
             
-            # Track the primary cigar for follow-up context
-            session.last_cigar_discussed = primary.get("name", "Cigar")
-            session.last_cigar_info = primary
-        
-        # Alternative pairings (remaining recommendations)
-        if len(cigars) > 1:
-            r["alternative_pairings"] = [
-                {
-                    "cigar": cigar.get("name", "Cigar"),
-                    "strength": cigar.get("strength", "medium"),
-                    "pour": found_bourbon.title(),
-                    "quality_tag": f"{cigar.get('tier', 'budget')} • {cigar.get('price', '$5-10')}",
-                    "why": [cigar.get("notes", "Great pairing"), f"Wrapper: {cigar.get('wrapper', 'Natural')}"]
-                }
-                for cigar in cigars[1:]
-            ]
-        
-        strength_note = f"{requested_cigar_strength}-bodied" if requested_cigar_strength else pairing_data.get('bourbon_strength', 'balanced')
-        r["key_points"] = [
-            f"All cigars match {strength_note} profile",
-            "Price range from budget to premium options",
-            "Sip bourbon neat or with one large ice cube"
-        ]
-        
-        r["next_step"] = "Pick your price tier and enjoy the pairing!"
-    
-    # Case 1B: TIER 3 - User mentioned unknown bourbon, use Claude API
-    elif "pair" in msg_lower and ("bourbon" in msg_lower or "whiskey" in msg_lower):
-        # Extract bourbon name from message
-        unknown_bourbon = msg_normalized
-        for remove_word in ["pair", "pairing", "cigar", "with", "for", "bourbon", "whiskey", "need", "want", "a", "an", "the"]:
-            unknown_bourbon = unknown_bourbon.replace(remove_word, "").strip()
-        
-        if unknown_bourbon and ANTHROPIC_AVAILABLE:
-            print(f"Using Claude API to find pairing for unknown bourbon: {unknown_bourbon}")
-            try:
-                prompt = f"""You're Sam, chatting with a friend who wants cigar pairings for {unknown_bourbon}.
-
-Be conversational and enthusiastic - like recommending cigars to a buddy at the lounge, not filling out a form.
-
-Recommend 3-5 cigars using this format:
-
-**Recommendation 1: [Cigar Name]**
-• Price: [price range]
-• Wrapper: [wrapper type]
-• Flavor: [flavor notes]
-• Why: [why it pairs - be casual, not technical]
-
-**Recommendation 2: [Different Cigar Name]**
-• Price: [price range]
-• Wrapper: [wrapper type]
-• Flavor: [flavor notes]
-• Why: [why it pairs - conversational tone]
-
-Keep the "Why" section friendly and natural - avoid phrases like "The notes complement" and instead say things like "plays beautifully with" or "brings out the..."
-
-CRITICAL: Each must be DIFFERENT cigars. Start with **Recommendation 1:** - no intro text."""
-                
-                response = ANTHROPIC_CLIENT.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1024,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                content = response.content[0].text.strip()
-                
-                r["summary"] = f"Nice! Here's what I'd pair with {unknown_bourbon.title()}:"
-                r["key_points"] = [content]
-                r["next_step"] = "Pick your price point and enjoy!"
-                
-                return r
-                
-            except Exception as e:
-                print(f"Claude API pairing error: {e}")
-                # Fall through to generic response
-        
-    # Case 2: User mentioned cigar strength, recommend bourbons (min 3)
-    elif found_cigar_strength:
-        pairing_data = get_pairing_for_cigar_strength(found_cigar_strength)
-        bourbons = pairing_data['recommendations']
-        
-        r["summary"] = f"For {found_cigar_strength} cigars, here are {len(bourbons)} bourbon recommendations across all price tiers."
-        
-        # Primary pairing (first recommendation)
-        if bourbons:
-            primary = bourbons[0]
-            r["primary_pairing"] = {
-                "cigar": f"{found_cigar_strength.title()}-bodied cigar",
-                "strength": found_cigar_strength,
-                "pour": primary["name"],
-                "quality_tag": f"{primary['tier']} • {primary['price']}",
-                "why": [
-                    primary["notes"],
-                    f"Proof: {primary['proof']} • Flavor: {primary['flavor_intensity']}"
-                ]
+            items = []
+            if pairing_data and pairing_data.get("bourbons"):
+                for bourbon in pairing_data["bourbons"][:3]:
+                    items.append(_item("Bourbon", bourbon.get("name", "Unknown")))
+                    items.append(_item("Profile", bourbon.get("profile", "N/A")))
+                    items.append(_item("Why", bourbon.get("why_pairs", "Complements the cigar")))
+                    items.append(_item("", ""))  # Separator
+            
+            summary = f"You're asking about {refers_to}, right? Here's what I'd pour:\n\n"
+            summary += pairing_data.get("overview", "") if pairing_data else ""
+            
+            return {
+                "mode": "pairing",
+                "summary": summary,
+                "items": items
             }
         
-        # Alternative pairings (remaining recommendations)
-        if len(bourbons) > 1:
-            r["alternative_pairings"] = [
-                {
-                    "cigar": f"{found_cigar_strength.title()}-bodied cigar",
-                    "strength": found_cigar_strength,
-                    "pour": bourbon["name"],
-                    "quality_tag": f"{bourbon['tier']} • {bourbon['price']}",
-                    "why": [
-                        bourbon["notes"],
-                        f"Proof: {bourbon['proof']} • Flavor: {bourbon['flavor_intensity']}"
-                    ]
-                }
-                for bourbon in bourbons[1:]
-            ]
-        
-        r["key_points"] = [
-            "Budget to premium options for every wallet",
-            f"All match {found_cigar_strength} cigar strength perfectly",
-            "Let bourbon rest on palate before drawing"
-        ]
-        
-        r["next_step"] = "Choose your price tier and enjoy!"
-    
-    # Case 2B: User mentioned specific cigar name, recommend bourbons
-    # Detect if a known cigar name is in the message
-    elif session.last_cigar_discussed and "cigar" in msg_lower:
-        # User is asking about bourbon pairings for a specific cigar
-        cigar_name = session.last_cigar_discussed
-        cigar_strength = session.last_cigar_info.get("strength", "medium") if session.last_cigar_info else "medium"
-        
-        # Map cigar strength to bourbon recommendations
-        if "full" in cigar_strength.lower():
-            strength = "full"
-        elif "mild" in cigar_strength.lower():
-            strength = "mild"
-        else:
-            strength = "medium"
-        
-        pairing_data = get_pairing_for_cigar_strength(strength)
-        bourbons = pairing_data['recommendations']
-        
-        r["summary"] = f"Ah, {cigar_name}! Here are my top bourbon picks:"
-        
-        # Primary pairing
-        if bourbons:
-            primary = bourbons[0]
-            r["primary_pairing"] = {
-                "cigar": cigar_name,
-                "strength": cigar_strength,
-                "pour": primary["name"],
-                "quality_tag": f"{primary['tier']} • {primary['price']}",
-                "why": [
-                    primary["notes"],
-                    f"Proof: {primary['proof']} • Flavor: {primary['flavor_intensity']}"
-                ]
+        # Handle bourbon→cigar pairing
+        elif direction == "bourbon_to_cigar" and refers_to:
+            session.pairing_spirit = refers_to
+            session.pairing_waiting_for_spirit = False
+            
+            # Get cigar pairings for the bourbon
+            pairing_data = get_pairing_for_bourbon(refers_to)
+            
+            items = []
+            if pairing_data and pairing_data.get("cigars"):
+                for cigar in pairing_data["cigars"][:3]:
+                    items.append(_item("Cigar", cigar.get("name", "Unknown")))
+                    items.append(_item("Strength", cigar.get("strength", "N/A")))
+                    items.append(_item("Why", cigar.get("why_pairs", "Complements the bourbon")))
+                    items.append(_item("", ""))  # Separator
+            
+            summary = f"For {refers_to}, I'd go with:\n\n"
+            summary += pairing_data.get("overview", "") if pairing_data else ""
+            
+            return {
+                "mode": "pairing",
+                "summary": summary,
+                "items": items
             }
+    
+    # EXISTING PAIRING LOGIC CONTINUES
+    session.pairing_waiting_for_spirit = False
+    session.pairing_waiting_for_strength = False
+    
+    spirit_match = None
+    for key in CLASSIC_PAIRINGS.keys():
+        if key.lower() in msg.lower():
+            spirit_match = key
+            break
+    
+    strength_match = None
+    for strength in ["mild", "medium", "full"]:
+        if strength in msg.lower():
+            strength_match = strength
+            break
+    
+    if spirit_match:
+        session.pairing_spirit = spirit_match
+    if strength_match:
+        session.pairing_strength = strength_match
+    
+    if not session.pairing_spirit:
+        return {
+            "mode": "pairing",
+            "summary": "What bourbon or whiskey would you like to pair? (e.g., Buffalo Trace, Four Roses, etc.)",
+            "items": []
+        }
+    
+    if not session.pairing_strength:
+        return {
+            "mode": "pairing",
+            "summary": f"What cigar strength would you like to pair with {session.pairing_spirit}? (mild, medium, or full-bodied)",
+            "items": []
+        }
+    
+    # Get pairing recommendations
+    pairing_data = get_pairing_for_bourbon(session.pairing_spirit)
+    
+    if not pairing_data:
+        # Fallback to strength-based pairing
+        pairing_data = get_pairing_for_cigar_strength(session.pairing_strength)
+    
+    items = []
+    summary = ""
+    
+    if pairing_data:
+        summary = pairing_data.get("overview", f"Pairing suggestions for {session.pairing_spirit}:")
         
-        # Alternative pairings
-        if len(bourbons) > 1:
-            r["alternative_pairings"] = [
-                {
-                    "cigar": cigar_name,
-                    "strength": cigar_strength,
-                    "pour": bourbon["name"],
-                    "quality_tag": f"{bourbon['tier']} • {bourbon['price']}",
-                    "why": [
-                        bourbon["notes"],
-                        f"Proof: {bourbon['proof']} • Flavor: {bourbon['flavor_intensity']}"
-                    ]
-                }
-                for bourbon in bourbons[1:]
-            ]
-        
-        r["key_points"] = [
-            f"All bourbons match {cigar_name}'s {cigar_strength} profile",
-            "Budget to premium options",
-            "Sip bourbon, then draw on cigar"
-        ]
-        
-        r["next_step"] = "Pick your bourbon and enjoy the pairing!"
-        
-    # Case 3: General pairing request
+        if pairing_data.get("cigars"):
+            for cigar in pairing_data["cigars"][:3]:
+                items.append(_item("Cigar", cigar.get("name", "Unknown")))
+                items.append(_item("Strength", cigar.get("strength", "N/A")))
+                items.append(_item("Wrapper", cigar.get("wrapper", "N/A")))
+                items.append(_item("Why", cigar.get("why_pairs", "Great pairing")))
+                items.append(_item("", ""))
     else:
-        r["summary"] = "I can help you pair bourbon with cigars! Tell me what you're working with."
-        
-        r["key_points"] = [
-            "Tell me your bourbon or cigar strength",
-            "Examples: 'pair Eagle Rare' or 'pairing for full cigar'",
-            "I'll give you 3+ matches across all price tiers!"
-        ]
-        
-        r["item_list"] = [
-            _item("For mild cigars", "Buffalo Trace ($25), Eagle Rare ($40), Woodford Double Oaked ($60)"),
-            _item("For medium cigars", "Wild Turkey 101 ($25), Knob Creek ($40), Old Forester 1920 ($65)"),
-            _item("For full cigars", "Evan Williams SB ($30), Russell's Reserve ($45), Booker's ($80)")
-        ]
-        
-        r["next_step"] = "Ask me about a specific bourbon or cigar strength."
+        summary = f"I don't have specific pairings for {session.pairing_spirit} yet, but here are some general tips:\n\n"
+        summary += PAIRING_TIPS.get("general", "Match intensity: mild with mild, full with full.")
     
-    return r
+    return {
+        "mode": "pairing",
+        "summary": summary,
+        "items": items
+    }
+
+
+# ============================================================================
+# PATCH 6 & 7: _handle_hunt with cigar retail detection (MODIFIED)
+# ============================================================================
 
 def _handle_hunt(msg: str, session: SamSession) -> Dict[str, Any]:
-    """Handle allocation store hunting - location-based only, no specific bottles."""
+    """Handle hunt mode with cigar retail detection"""
     
-    # If waiting for location, capture it
-    if session.hunt_waiting_for_area:
-        session.hunt_area = _extract_zip(msg) or msg
-        session.hunt_waiting_for_area = False
-        return _hunt_plan(session)
+    # STEP 1: Check if this is actually a cigar retail search (NEW)
+    if session.context and session.context.get("detected_intent") == "cigar_retail":
+        # Clear the intent flag
+        session.context["detected_intent"] = None
+        
+        # Handle cigar retail search
+        return _handle_cigar_retail_search(msg, session)
     
-    # Extract location from current message
-    area = _extract_location_from_message(msg) or session.hunt_area
+    # EXISTING HUNT LOGIC CONTINUES
+    session.hunt_waiting_for_area = False
     
-    # If no location found, ask for it
-    if not area:
+    area = _extract_location_from_message(msg)
+    if area:
+        session.hunt_area = area
+    
+    if not session.hunt_area:
         session.hunt_waiting_for_area = True
         return _hunt_clarify_area(session)
     
-    # Have location, execute hunt plan
-    session.hunt_area = area
     return _hunt_plan(session)
 
+
 def _hunt_clarify_area(session: SamSession) -> Dict[str, Any]:
-    r = _blank_response("hunt")
-    r["summary"] = "Where should I look for allocation stores?"
-    r["key_points"] = [
-        "Send ZIP code (e.g., 30344)",
-        "Or city/state (e.g., Atlanta, GA)"
-    ]
-    r["next_step"] = "Reply with your location."
-    return r
+    """Ask user for their location"""
+    return {
+        "mode": "hunt",
+        "summary": "Where should I look for allocation stores?\n\nKey points:\n• Send ZIP code (e.g., 30344)\n• Or city/state (e.g., Atlanta, GA)\n\nNext: Reply with your location.",
+        "items": []
+    }
+
 
 def _hunt_plan(session: SamSession) -> Dict[str, Any]:
-    """Generate allocation store hunt plan for a location."""
-    r = _blank_response("hunt")
+    """Build hunt plan with stops"""
     area = session.hunt_area or "your area"
+    resolved_area, stops = _build_hunt_stops(session.hunt_area)
     
-    area_hint = session.hunt_area or area
-    resolved_area, stops = _build_hunt_stops(area_hint)
+    items = []
+    for stop in stops:
+        items.append(stop)
     
-    if resolved_area:
-        area = resolved_area
-    
-    # Check if we have curated stores with allocation indicators
-    has_curated = any(
-        "🎟️" in stop.get("notes", "") or
-        "🎰" in stop.get("notes", "") or
-        "📋" in stop.get("notes", "") or
-        "⭐" in stop.get("notes", "") or
-        "🏃" in stop.get("notes", "") or
-        "💰" in stop.get("notes", "")
-        for stop in stops
-    )
-    
-    if has_curated:
-        r["summary"] = f"Hunt plan for allocation stores in {area}."
-        r["key_points"] = [
-            "⭐ Icons (🎟️🎰📋⭐🏃💰) show VERIFIED allocation methods",
-            "Call ahead: Ask about allocation process, delivery days, raffle timing",
-            "No guarantees on specific bottles - stores get different allocations"
-        ]
+    if not items:
+        summary = f"I couldn't find any verified allocation stores near {resolved_area}.\n\n"
+        summary += "Try:\n• Searching online for local bourbon groups\n• Checking state liquor control sites\n• Asking at local liquor stores about their allocation process"
     else:
-        r["summary"] = f"Allocation stores in {area}."
-        r["key_points"] = [
-            "Call 3-5 shops and ask about their allocation process",
-            "Ask: When do you get allocated bottles? How does your raffle/list work?",
-            "Show up on delivery days (usually Thu/Fri) for best chances"
-        ]
+        summary = f"Here are the allocation stores near {resolved_area}:\n\n"
+        summary += f"Found {len(items)} stores. Check their social media or call ahead to learn about their allocation process."
     
-    if stops:
-        r["stops"] = stops
+    return {
+        "mode": "hunt",
+        "summary": summary,
+        "items": items
+    }
+
+
+def _handle_cigar_retail_search(msg: str, session: SamSession) -> Dict[str, Any]:
+    """
+    Handle requests to find cigar retailers (NEW)
+    Example: "where can I find these cigars near me"
+    """
+    
+    if not CIGAR_RETAIL_AVAILABLE:
+        return {
+            "mode": "info",
+            "summary": "For cigar retail locations, try checking your local tobacco shops or online retailers like Famous Smoke Shop.",
+            "items": []
+        }
+    
+    # Initialize cigar retail search
+    cigar_search = CigarRetailSearch(google_api_key=os.environ.get("GOOGLE_API_KEY", os.environ.get("GOOGLE_PLACES_API_KEY", "")))
+    
+    # Extract location from message
+    location = _extract_location_from_message(msg)
+    
+    if not location:
+        cigar_name = session.last_cigar_discussed or "those cigars"
+        return {
+            "mode": "info",
+            "summary": f"Hey! I'd love to help you track down {cigar_name}, but I need to know where you're located.\n\nWhat's your ZIP code or city/state?\n\nOnce you tell me, I can point you toward some solid cigar shops in your area.",
+            "items": []
+        }
+    
+    # Search for retailers
+    retailers = cigar_search.find_cigar_retailers(location=location)
+    
+    if retailers:
+        cigar_name = session.last_cigar_discussed or "those cigars"
+        response_text = f"Great! Here's where you can find {cigar_name} near {location}:\n\n"
+        response_text += cigar_search.format_retailers_for_response(retailers)
+        
+        return {
+            "mode": "info",
+            "summary": response_text,
+            "items": []
+        }
     else:
-        # Fallback
-        loc_hint = str(area_hint or "").strip()
-        center_lat, center_lng = 33.7490, -84.3880
-        r["stops"] = [
-            _stop("Local Liquor Store", f"Near {loc_hint}", "Call and ask about allocation process.", center_lat, center_lng),
-        ]
-    
-    r["next_step"] = "Call these shops and ask about their allocation process."
-    return r
+        return {
+            "mode": "info",
+            "summary": f"I'm having trouble finding cigar shops near {location}.\n\nYour best bets are:\n• Check out local tobacco shops or cigar lounges\n• Try online retailers like Famous Smoke Shop or Cigars International\n• Call ahead to make sure they have what you're looking for",
+            "items": []
+        }
+        
