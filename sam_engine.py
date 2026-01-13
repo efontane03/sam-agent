@@ -1635,4 +1635,3 @@ def _handle_cigar_retail_search(msg: str, session: SamSession) -> Dict[str, Any]
             "summary": f"I'm having trouble finding cigar shops near {location}.\n\nYour best bets are:\n• Check out local tobacco shops or cigar lounges\n• Try online retailers like Famous Smoke Shop or Cigars International\n• Call ahead to make sure they have what you're looking for",
             "items": []
         }
-        
