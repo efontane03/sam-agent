@@ -155,16 +155,24 @@ class MessagePreprocessor:
     def detect_more_options_request(cls, message: str) -> bool:
         """
         Detect if user is asking for more options/recommendations
+        Handles: "more", "list five more", "can you list more", "give me another", etc.
         """
         message_lower = message.lower()
         
-        more_keywords = ["more", "other", "another", "different", "additional"]
-        option_keywords = ["option", "recommendation", "choice", "suggestion", "alternative"]
+        # Expanded keywords to catch more variations
+        more_keywords = ["more", "other", "another", "different", "additional", "else"]
+        option_keywords = ["option", "recommendation", "choice", "suggestion", "alternative", "list", "five", "three", "one", "two"]
+        number_words = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
         
         has_more = any(kw in message_lower for kw in more_keywords)
         has_option = any(kw in message_lower for kw in option_keywords)
+        has_number = any(num in message_lower for num in number_words) or any(char.isdigit() for char in message_lower)
         
-        return has_more and has_option
+        # "can you list five more" = has_option (list) + has_number (five) + has_more (more)
+        # "give me another" = has_more (another)
+        # "more options" = has_more + has_option
+        
+        return (has_more and has_option) or (has_more and has_number) or (has_number and "list" in message_lower)
 
 
 # ============================================================================
@@ -983,37 +991,67 @@ def _answer_general_knowledge(question: str, session: Optional[SamSession] = Non
         return None
     
     try:
-        prompt = f"""You are Sam, a bourbon and cigar enthusiast who loves talking shop. You're knowledgeable but laid-back - like chatting with a friend at a cigar lounge, not reading from a textbook.
+        # Build context-aware information
+        context_info = ""
+        if session:
+            if session.last_cigar_discussed:
+                context_info += f"\n\nCONTEXT: User was just discussing {session.last_cigar_discussed} cigars."
+            if session.last_bourbon_discussed:
+                context_info += f"\n\nCONTEXT: User was just discussing {session.last_bourbon_discussed} bourbon."
+            if hasattr(session, 'conversation_history') and session.conversation_history:
+                recent_messages = session.conversation_history[-3:]  # Last 3 messages
+                if recent_messages:
+                    context_info += f"\n\nRECENT CONVERSATION:\n"
+                    for msg in recent_messages:
+                        context_info += f"- {msg}\n"
+        
+        prompt = f"""You are Sam, a bourbon and cigar enthusiast. You're the friend people text when they need a recommendation - knowledgeable but never pretentious.
 
-User asked: "{question}"
+User asked: "{question}"{context_info}
 
-Conversational guidelines:
-- Talk naturally, like you're having a conversation over drinks
-- Use "I'd go with" instead of "I recommend"
-- Be enthusiastic but not over-the-top
-- Share insights casually, not robotically
-- Keep it 2-4 sentences unless user wants more detail
+YOUR PERSONALITY:
+- Talk like you're texting a friend, not writing a review
+- Vary your sentence structure - mix short punchy lines with longer thoughts
+- Use contractions (it's, you're, I'd) naturally
+- Show enthusiasm without sounding fake
+- Drop in personal preferences casually ("this is what I reach for...")
 
-Rules:
+CRITICAL FORMATTING RULES:
+1. NEVER use the same structure twice in a row
+2. Mix narrative with occasional bullets (not pure bullets)
+3. For cigar recommendations, vary your approach:
+   
+   Style 1 (Conversational):
+   "Looking for [style]? Start with [Name] - it's got this [flavor] thing going on. 
+   Around [price]. [Why it works]."
+   
+   Style 2 (Mixed):
+   "[Name] is where I'd go. [Why]. You're looking at [price], and it's worth it for [benefit].
+   
+   Quick specs: [wrapper], [strength], [flavor notes]"
+   
+   Style 3 (Casual bullets):
+   "Grab a [Name]. Here's why:
+   - [Reason 1 in natural language]
+   - [Reason 2]
+   Price sits around [price]."
+
+4. NEVER start with "**Recommendation 1:**" - that's robotic
+5. Change up your language - don't repeat phrases like "absolute perfection" or "incredibly consistent"
+6. If recommending multiple cigars, use COMPLETELY different structures for each
+
+CONTEXT AWARENESS:
+- If user said "more" or "another" or "list five more", they want MORE of what you just discussed
+- Use the CONTEXT and RECENT CONVERSATION above to understand what they're referring to
+- Don't ask for clarification if context is clear
+
+RULES:
 1. ONLY answer questions about bourbon, whiskey, spirits, or cigars
 2. If off-topic, say: "I'm your bourbon & cigar expert! Let's talk spirits and sticks."
-3. For CIGAR RECOMMENDATIONS, provide 2-3 DIFFERENT cigars in bullet format:
-   
-   **Recommendation 1: [Cigar Name]**
-   • Price: [price range]
-   • Wrapper: [wrapper type]
-   • Flavor: [flavor notes]
-   • Why: [reason to choose]
-   
-   **Recommendation 2: [Different Cigar Name]**
-   • Price: [price range]
-   • Wrapper: [wrapper type]
-   • Flavor: [flavor notes]
-   • Why: [reason to choose]
-   
-   Each recommendation MUST be different. NO intro text, start with **Recommendation 1:**
+3. Keep responses authentic and varied - never formulaic
+4. For "list X more", provide X different recommendations using varied formats
 
-Answer:"""
+Answer naturally:"""
         
         response = ANTHROPIC_CLIENT.messages.create(
             model="claude-sonnet-4-20250514",
@@ -1028,65 +1066,6 @@ Answer:"""
         print(answer)
         print(f"{'='*60}\n")
         
-        # SIMPLE AND ROBUST duplicate removal
-        # Split into recommendation blocks, keep only unique ones
-        blocks = []
-        current_block = []
-        seen_cigars = set()
-        
-        for line in answer.split('\n'):
-            if line.startswith('**Recommendation'):
-                # New recommendation starting
-                if current_block:
-                    # Save previous block
-                    blocks.append('\n'.join(current_block))
-                    current_block = []
-                current_block.append(line)
-            elif current_block:
-                # Part of current recommendation block
-                current_block.append(line)
-            else:
-                # Not part of any recommendation, keep it
-                blocks.append(line)
-        
-        # Don't forget last block
-        if current_block:
-            blocks.append('\n'.join(current_block))
-        
-        print(f"FOUND {len(blocks)} BLOCKS")
-        for i, block in enumerate(blocks):
-            print(f"\nBLOCK {i}:")
-            print(block[:100] + "..." if len(block) > 100 else block)
-        
-        # Now filter out duplicate recommendations
-        unique_blocks = []
-        for block in blocks:
-            if block.startswith('**Recommendation'):
-                # Extract cigar name
-                try:
-                    first_line = block.split('\n')[0]
-                    cigar_name = first_line.split(':', 1)[1].strip().rstrip('*').strip().lower()
-                    print(f"\nChecking cigar: '{cigar_name}'")
-                    if cigar_name not in seen_cigars:
-                        print(f"  → KEEPING (unique)")
-                        seen_cigars.add(cigar_name)
-                        unique_blocks.append(block)
-                    else:
-                        print(f"  → SKIPPING (duplicate)")
-                    # else: skip duplicate
-                except Exception as e:
-                    print(f"  → ERROR parsing: {e}, keeping anyway")
-                    unique_blocks.append(block)
-            else:
-                unique_blocks.append(block)
-        
-        answer = '\n'.join(unique_blocks).strip()
-        
-        print(f"\n{'='*60}")
-        print("CLEANED OUTPUT:")
-        print(answer)
-        print(f"{'='*60}\n")
-        
         # Track cigars mentioned in the response (for context)
         if session:
             KNOWN_CIGAR_BRANDS = [
@@ -1096,9 +1075,11 @@ Answer:"""
             ]
             
             question_lower = question.lower()
-            # Check if user asked about a specific cigar
+            answer_lower = answer.lower()
+            
+            # Check if user asked about a specific cigar OR if it appears in the response
             for brand in KNOWN_CIGAR_BRANDS:
-                if brand in question_lower:
+                if brand in question_lower or brand in answer_lower:
                     session.last_cigar_discussed = brand.title()
                     print(f"Tracked cigar in session: {session.last_cigar_discussed}")
                     break
@@ -1118,6 +1099,8 @@ Answer:"""
         }
         
     except Exception as e:
+        print(f"Error calling Claude API: {e}")
+        return None
         print(f"Error in general knowledge: {e}")
         return None
 
